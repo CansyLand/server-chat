@@ -11,6 +11,14 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <meta name="apple-mobile-web-app-title" content="Claude" />
 <link rel="stylesheet" href="/style.css" />
+<script>
+  // Applied synchronously, before body paint, so switching themes never
+  // flashes the default profile for a frame on load.
+  (function () {
+    var t = localStorage.getItem('xqlytskg_theme');
+    if (t && t !== 'indigo') document.documentElement.dataset.theme = t;
+  })();
+</script>
 <script src="/vendor/marked.min.js"></script>
 <script src="/vendor/purify.min.js"></script>
 </head>
@@ -23,12 +31,6 @@
 </div>
 
 <div id="app" hidden>
-  <header>
-    <span class="title">Claude</span>
-    <span id="status">connecting…</span>
-    <button id="notify-btn" hidden type="button">Enable notifications</button>
-    <button id="settings-btn" type="button" aria-label="Settings">⚙</button>
-  </header>
 
   <p id="gate-hint" hidden class="hint">Add this to your Home Screen, then open it from there to enable notifications (iOS requirement).</p>
 
@@ -37,12 +39,66 @@
     <button id="auth-repair-btn" type="button">Re-pair this device</button>
   </div>
 
-  <main id="messages"></main>
+  <!-- ---- Agent list: the landing screen, one row per agent on this server ---- -->
+  <div id="list-view">
+    <header>
+      <span class="title">Agents</span>
+      <span id="status">connecting…</span>
+      <button id="notify-btn" hidden type="button">Enable notifications</button>
+      <button id="new-agent-btn" type="button" aria-label="New agent">+</button>
+      <button id="settings-btn" type="button" aria-label="Settings">⚙</button>
+    </header>
+    <main id="agent-list"></main>
+  </div>
 
-  <form id="composer">
-    <textarea id="input" rows="1" placeholder="Message Claude…" autocomplete="off"></textarea>
-    <button type="submit" aria-label="Send">↑</button>
-  </form>
+  <!-- ---- Chat view: scoped to whichever agent was tapped in the list ---- -->
+  <div id="chat-view" hidden>
+    <header>
+      <button id="back-btn" type="button" aria-label="Back to agent list">←</button>
+      <span id="chat-agent-emoji" class="chat-agent-emoji"></span>
+      <span id="chat-agent-name" class="title"></span>
+    </header>
+    <main id="messages"></main>
+    <form id="composer">
+      <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
+      <button type="submit" aria-label="Send">↑</button>
+    </form>
+  </div>
+
+</div>
+
+<div id="new-agent-modal" hidden>
+  <div class="settings-sheet">
+    <h2 class="sheet-title">New agent</h2>
+    <form id="new-agent-form">
+      <label class="field-label" for="new-agent-name">Name</label>
+      <input id="new-agent-name" type="text" maxlength="60" placeholder="e.g. Art" autocomplete="off" required />
+
+      <label class="field-label">Avatar</label>
+      <div class="emoji-picker" id="emoji-picker"></div>
+
+      <label class="field-label">Color</label>
+      <div class="theme-swatches" id="new-agent-colors">
+        <button type="button" class="theme-swatch active" data-color="#7c9cff" style="--sw:#7c9cff" aria-label="Indigo"></button>
+        <button type="button" class="theme-swatch" data-color="#4ade80" style="--sw:#4ade80" aria-label="Emerald"></button>
+        <button type="button" class="theme-swatch" data-color="#ffb84d" style="--sw:#ffb84d" aria-label="Amber"></button>
+        <button type="button" class="theme-swatch" data-color="#ff7a9c" style="--sw:#ff7a9c" aria-label="Rose"></button>
+        <button type="button" class="theme-swatch" data-color="#4fd1c5" style="--sw:#4fd1c5" aria-label="Teal"></button>
+        <button type="button" class="theme-swatch" data-color="#b58bff" style="--sw:#b58bff" aria-label="Violet"></button>
+      </div>
+
+      <label class="field-label" for="new-agent-workdir">Working directory</label>
+      <input id="new-agent-workdir" type="text" placeholder="/home/cansy" autocomplete="off" />
+
+      <label class="field-label" for="new-agent-persona">Persona <span class="field-optional">(optional)</span></label>
+      <textarea id="new-agent-persona" rows="3" placeholder="e.g. You are an art specialist. Only discuss art, painting, design, and art history."></textarea>
+
+      <p id="new-agent-error" class="error-text" hidden></p>
+
+      <button type="submit" id="new-agent-submit">Create agent</button>
+      <button type="button" id="new-agent-cancel">Cancel</button>
+    </form>
+  </div>
 </div>
 
 <div id="settings-modal" hidden>
@@ -50,6 +106,17 @@
     <div class="settings-row">
       <span>Version</span>
       <span id="settings-version">…</span>
+    </div>
+    <div class="settings-row theme-row">
+      <span>Theme</span>
+      <div class="theme-swatches" id="theme-swatches">
+        <button type="button" class="theme-swatch" data-theme="indigo" style="--sw:#7c9cff" aria-label="Indigo"></button>
+        <button type="button" class="theme-swatch" data-theme="emerald" style="--sw:#4ade80" aria-label="Emerald"></button>
+        <button type="button" class="theme-swatch" data-theme="amber" style="--sw:#ffb84d" aria-label="Amber"></button>
+        <button type="button" class="theme-swatch" data-theme="rose" style="--sw:#ff7a9c" aria-label="Rose"></button>
+        <button type="button" class="theme-swatch" data-theme="teal" style="--sw:#4fd1c5" aria-label="Teal"></button>
+        <button type="button" class="theme-swatch" data-theme="violet" style="--sw:#b58bff" aria-label="Violet"></button>
+      </div>
     </div>
     <button id="settings-update-btn" type="button">Check for updates</button>
     <button id="settings-close-btn" type="button">Close</button>

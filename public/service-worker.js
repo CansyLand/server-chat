@@ -42,6 +42,7 @@ self.addEventListener('push', (event) => {
   const title = data.title || 'Claude';
   const body = data.body || 'New message';
   const unread = typeof data.unread === 'number' ? data.unread : undefined;
+  const agentId = typeof data.agentId === 'string' ? data.agentId : null;
 
   event.waitUntil(
     (async () => {
@@ -49,8 +50,9 @@ self.addEventListener('push', (event) => {
         body,
         icon: '/icons/icon-192.png',
         badge: '/icons/icon-192.png',
-        tag: 'xqlytskg-chat',
+        tag: agentId || 'xqlytskg-chat',
         renotify: true,
+        data: { agentId },
       });
       if (unread !== undefined && 'setAppBadge' in self.navigator) {
         try {
@@ -65,13 +67,14 @@ self.addEventListener('push', (event) => {
 });
 
 self.addEventListener('notificationclick', (event) => {
+  const agentId = event.notification.data?.agentId || null;
   event.notification.close();
   event.waitUntil(
     (async () => {
       const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of allClients) {
         if ('focus' in client) {
-          client.postMessage({ type: 'notification-click' });
+          client.postMessage({ type: 'notification-click', agentId });
           return client.focus();
         }
       }

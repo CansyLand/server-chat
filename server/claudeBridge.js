@@ -10,9 +10,11 @@ const WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 // with --resume so the conversation (Claude's own on-disk session history)
 // picks back up rather than starting over.
 export class ClaudeBridge extends EventEmitter {
-  constructor({ sessionId } = {}) {
+  constructor({ sessionId, workdir, systemPrompt } = {}) {
     super();
     this.sessionId = sessionId || null;
+    this.workdir = workdir || WORKDIR;
+    this.systemPrompt = systemPrompt || null;
     this.child = null;
     this.buf = '';
     this.shuttingDown = false;
@@ -28,6 +30,9 @@ export class ClaudeBridge extends EventEmitter {
       '--permission-mode', 'bypassPermissions',
       '--verbose',
     ];
+    if (this.systemPrompt) {
+      args.push('--append-system-prompt', this.systemPrompt);
+    }
     if (this.sessionId) {
       args.push('--resume', this.sessionId);
     } else {
@@ -36,7 +41,7 @@ export class ClaudeBridge extends EventEmitter {
     }
 
     this.child = spawn(CLAUDE_BIN, args, {
-      cwd: WORKDIR,
+      cwd: this.workdir,
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
