@@ -14,6 +14,46 @@ const PORT = process.env.PORT || 8720;
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'data', 'pairing-code.secret');
 const DEFAULT_WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
+const VALID_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+
+// "You've hit your session limit · resets 2:30am (UTC)" — matched leniently
+// (only the digits + am/pm + UTC actually matter for scheduling the retry)
+// since Anthropic could tweak the exact separator/wording around it. The
+// minutes group is optional: on an exact hour the CLI drops it entirely
+// ("resets 5pm (UTC)", no ":00") — missing that format once already caused
+// a real detection failure, so this is now deliberately tested against both.
+const SESSION_LIMIT_RE = /session limit.*?resets?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(UTC\)/i;
+
+function parseSessionLimitReset(text) {
+  if (typeof text !== 'string') return null;
+  const m = text.match(SESSION_LIMIT_RE);
+  if (!m) return null;
+  let hour = parseInt(m[1], 10);
+  const minute = m[2] ? parseInt(m[2], 10) : 0;
+  const isPm = /pm/i.test(m[3]);
+  if (isPm && hour !== 12) hour += 12;
+  if (!isPm && hour === 12) hour = 0;
+  const now = new Date();
+  let target = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(), hour, minute, 0, 0));
+  if (target.getTime() <= now.getTime()) target = new Date(target.getTime() + 24 * 60 * 60 * 1000);
+  return target;
+}
+
+// Parses the reply from a `/usage` slash command, e.g.:
+//   "Current session: 94% used · resets Jul 25, 5pm (UTC)"
+//   "Current week (all models): 91% used · resets Jul 29, 11am (UTC)"
+// Lenient on the punctuation between "used" and "resets" since that's just
+// a separator character, not meaningful structure.
+function parseUsageText(text) {
+  if (typeof text !== 'string') return null;
+  const sessionMatch = text.match(/Current session:\s*(\d+)%\s*used.*?resets\s+([^\n]+)/i);
+  const weekMatch = text.match(/Current week[^:\n]*:\s*(\d+)%\s*used.*?resets\s+([^\n]+)/i);
+  if (!sessionMatch && !weekMatch) return null;
+  return {
+    session: sessionMatch ? { percent: parseInt(sessionMatch[1], 10), resetsLabel: sessionMatch[2].trim() } : null,
+    week: weekMatch ? { percent: parseInt(weekMatch[1], 10), resetsLabel: weekMatch[2].trim() } : null,
+  };
+}
 
 // Changes every daemon restart, which happens on every deploy — a cheap,
 // zero-maintenance build fingerprint for the settings panel.
@@ -55,6 +95,21 @@ app.get('/api/version', requireAuth, (req, res) => {
   res.json({ version: BUILD_VERSION });
 });
 
+// Manual restart from the settings panel. Responds first, then exits after
+// a short delay so the response actually reaches the client before the
+// socket goes away — systemd's Restart=always brings the process back up
+// within a few seconds, same as a manual `systemctl restart`. The client's
+// own WebSocket reconnect + connection banner is what shows progress; there
+// is no separate "restarting" protocol message, the dropped connection IS
+// the signal.
+app.post('/api/restart', requireAuth, (req, res) => {
+  res.json({ ok: true });
+  setTimeout(() => {
+    for (const { bridge } of runtimes.values()) bridge.stop();
+    process.exit(0);
+  }, 300);
+});
+
 // ---- Agent runtime: one persistent Claude session per agent, all running
 // concurrently in this one process. Keyed by agentId. ----
 const runtimes = new Map(); // agentId -> { bridge, currentTurn, liveDeltaBuffer, turnStartedAt, activeToolName }
@@ -91,6 +146,12 @@ function toolResultPreview(content) {
   return '';
 }
 
+function lastActivityTs(agentId) {
+  const messages = store.getMessages(agentId);
+  const last = messages[messages.length - 1];
+  return last ? last.ts : 0;
+}
+
 function rosterEntry(agent) {
   const messages = store.getMessages(agent.id);
   const last = messages[messages.length - 1] || null;
@@ -100,9 +161,14 @@ function rosterEntry(agent) {
     name: agent.name,
     emoji: agent.emoji,
     color: agent.color,
+    workdir: agent.workdir,
+    systemPrompt: agent.systemPrompt,
+    model: agent.model || 'sonnet',
+    slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
     lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
-    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName } : null,
+    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
+    sleeping: !runtime,
   };
 }
 
@@ -115,17 +181,34 @@ function broadcastRosterEntry(agentId) {
   if (agent) broadcast({ type: 'roster_entry', agent: rosterEntry(agent) });
 }
 
+// Every agent gets this, regardless of persona — otherwise there's no way
+// for an agent to know its own id (needed for its own /api/agents/:id/...
+// calls) short of a human telling it out of band. Full API details live in
+// the shared memory system instead of here, since every agent in this app
+// shares the same home directory and therefore the same auto-loaded memory.
+function buildFullSystemPrompt(agent) {
+  const selfContext = `[xqlytskg-chat context: you are agent "${agent.name}" (id: ${agent.id}) inside this chat app. It gives you a per-agent task list via a REST API — see your memory for the endpoints, auth, and workflow.]`;
+  return agent.systemPrompt ? `${selfContext}\n\n${agent.systemPrompt}` : selfContext;
+}
+
 function startAgentBridge(agent) {
   const bridge = new ClaudeBridge({
     sessionId: agent.sessionId,
     workdir: agent.workdir,
-    systemPrompt: agent.systemPrompt,
+    systemPrompt: buildFullSystemPrompt(agent),
+    model: agent.model,
   });
-  const runtime = { bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null };
+  const runtime = {
+    bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null,
+    interrupted: false, waitingUntil: null, lastUserText: null, retryTimeoutId: null, slashCommands: [],
+    usageProbe: false,
+  };
   runtimes.set(agent.id, runtime);
 
-  bridge.on('ready', ({ sessionId }) => {
+  bridge.on('ready', ({ sessionId, slashCommands }) => {
     store.setAgentSessionId(agent.id, sessionId);
+    runtime.slashCommands = slashCommands || [];
+    broadcastRosterEntry(agent.id);
   });
 
   bridge.on('delta', (text) => {
@@ -155,12 +238,63 @@ function startAgentBridge(agent) {
   });
 
   bridge.on('turn_done', async ({ text, isError }) => {
+    // An invisible background /usage probe (see refreshUsage below) — never
+    // shown as a real message, never counted as unread, doesn't touch the
+    // rate-limit/interrupt handling below at all.
+    if (runtime.usageProbe) {
+      runtime.usageProbe = false;
+      runtime.currentTurn = null;
+      runtime.liveDeltaBuffer = '';
+      runtime.turnStartedAt = null;
+      runtime.activeToolName = null;
+      const parsed = parseUsageText(text);
+      if (parsed) {
+        latestUsage = { ...parsed, updatedAt: Date.now() };
+        broadcast({ type: 'usage_update', usage: latestUsage });
+      }
+      broadcastRosterEntry(agent.id); // clears the brief working-indicator state
+      return;
+    }
+
+    // A user-requested stop: the CLI's own result text for an interrupted
+    // turn isn't useful (empty/error-shaped), so keep whatever had already
+    // streamed to the client instead — same idea as "stop generating"
+    // elsewhere, the partial answer becomes the final one.
+    const wasInterrupted = runtime.interrupted;
+    runtime.interrupted = false;
+
+    // Hit the account's session limit: rather than showing this as a failed
+    // reply and leaving the user to notice and resend by hand, schedule an
+    // automatic resend of the same message once the limit resets. Nothing
+    // is saved to the chat as an error — the eventual real reply is the
+    // only message that ends up in history, same as if it had just taken a
+    // few hours to think.
+    if (!wasInterrupted && isError) {
+      const resetAt = parseSessionLimitReset(text);
+      if (resetAt) {
+        runtime.currentTurn = null;
+        runtime.liveDeltaBuffer = '';
+        runtime.activeToolName = null;
+        runtime.waitingUntil = resetAt.getTime();
+        // turnStartedAt deliberately stays set — this agent is still
+        // "busy" (waiting to retry), which also keeps it out of the
+        // idle-sleep sweep for the duration of the wait.
+        store.updateAgent(agent.id, { waitingUntil: runtime.waitingUntil, lastUserText: runtime.lastUserText });
+        broadcast({ type: 'waiting', agentId: agent.id, resumesAt: runtime.waitingUntil });
+        broadcastRosterEntry(agent.id);
+        scheduleRetry(agent.id, resetAt);
+        return;
+      }
+    }
+
+    const finalText = wasInterrupted ? (runtime.liveDeltaBuffer || '_Stopped before responding._') : text;
+
     const message = {
       id: randomUUID(),
       role: 'assistant',
-      text,
+      text: finalText,
       ts: Date.now(),
-      isError,
+      isError: wasInterrupted ? false : isError,
       tools: runtime.currentTurn?.tools || [],
     };
     store.addMessage(agent.id, message);
@@ -171,8 +305,9 @@ function startAgentBridge(agent) {
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
     broadcastRosterEntry(agent.id);
+    refreshUsage(); // a real turn just spent tokens — the numbers may have moved
 
-    if (!anyClientViewing(agent.id)) {
+    if (!wasInterrupted && !anyClientViewing(agent.id)) {
       store.incrementUnread(agent.id);
       const current = store.getAgent(agent.id) || agent;
       await sendPush({
@@ -201,13 +336,122 @@ function startAgentBridge(agent) {
   });
 
   bridge.start();
+
+  // If this agent was mid-wait for a session-limit reset when the server
+  // last stopped (a restart, a deploy, the settings-panel restart button —
+  // all common enough in this app that losing the whole point of "don't
+  // make me monitor it" on every restart would defeat the feature), pick
+  // the wait back up rather than silently dropping it. If the reset time
+  // already passed while the server was down, this retries right away.
+  if (agent.waitingUntil) {
+    runtime.waitingUntil = agent.waitingUntil;
+    runtime.lastUserText = agent.lastUserText || null;
+    runtime.turnStartedAt = Date.now();
+    scheduleRetry(agent.id, new Date(agent.waitingUntil));
+  }
+
   return runtime;
+}
+
+// Cleanly stops an agent's Claude process and drops its runtime — the agent
+// itself (and its session id, so `--resume` picks the conversation right
+// back up) lives on in the store; this only affects whether a process is
+// currently resident. Absence from `runtimes` *is* the "sleeping" state.
+function stopAgentBridge(agentId) {
+  const runtime = runtimes.get(agentId);
+  if (!runtime) return;
+  runtime.bridge.stop();
+  runtimes.delete(agentId);
+}
+
+// Schedules the automatic resend of an agent's last message once its
+// session limit resets. A generous +60s safety margin past the stated
+// reset time absorbs clock skew against Anthropic's servers — retrying a
+// few seconds late is free, retrying early just means hitting the same
+// limit again for nothing.
+function scheduleRetry(agentId, resetAt) {
+  const runtime = runtimes.get(agentId);
+  if (!runtime) return;
+  if (runtime.retryTimeoutId) clearTimeout(runtime.retryTimeoutId);
+  const delay = Math.max(1000, resetAt.getTime() - Date.now() + 60000);
+  runtime.retryTimeoutId = setTimeout(() => attemptRetrySend(agentId, 0), delay);
+}
+
+function attemptRetrySend(agentId, attempt) {
+  const runtime = runtimes.get(agentId);
+  if (!runtime || !runtime.waitingUntil) return; // cancelled, deleted, or agent asleep
+  const text = runtime.lastUserText;
+  if (!text) return;
+  try {
+    runtime.bridge.send(text);
+    runtime.waitingUntil = null;
+    runtime.retryTimeoutId = null;
+    runtime.turnStartedAt = Date.now();
+    runtime.activeToolName = null;
+    store.updateAgent(agentId, { waitingUntil: null });
+    broadcast({ type: 'turn_started', agentId });
+    broadcastRosterEntry(agentId);
+  } catch (err) {
+    // Most likely the bridge process hasn't finished (re)spawning yet
+    // (e.g. it happened to exit around the same time for an unrelated
+    // reason) — a few short retries covers that without giving up on the
+    // whole point of this feature over a transient timing issue.
+    if (attempt >= 5) {
+      broadcast({ type: 'system', agentId, text: `Auto-retry failed: ${err.message}` });
+      return;
+    }
+    runtime.retryTimeoutId = setTimeout(() => attemptRetrySend(agentId, attempt + 1), 3000);
+  }
 }
 
 for (const agent of store.listAgents()) startAgentBridge(agent);
 
+// ---- Idle sleep: an agent nobody has messaged in a day is pure idle
+// memory (~200MB+ per resident `claude` process) for no benefit — waking
+// it back up on the next message is just a normal --resume, so there's no
+// real cost to letting it go to sleep in between. ----
+const IDLE_SLEEP_MS = 24 * 60 * 60 * 1000;
+
+setInterval(() => {
+  const now = Date.now();
+  for (const [agentId, runtime] of runtimes) {
+    if (runtime.turnStartedAt) continue; // never sleep mid-turn
+    if (now - lastActivityTs(agentId) > IDLE_SLEEP_MS) {
+      stopAgentBridge(agentId);
+      broadcastRosterEntry(agentId);
+    }
+  }
+}, 60 * 60 * 1000); // hourly check is plenty coarse for a ~24h threshold
+
+// ---- Account usage tracking: the CLI doesn't push this proactively, so we
+// ask via an invisible `/usage` probe whenever the numbers could plausibly
+// have changed (see the two call sites below) — account-wide, so it's
+// stored globally rather than per-agent. Only ever probes an agent nobody
+// is currently looking at, so it can never flicker a stray "Thinking…" into view.
+let latestUsage = null; // { session: {...}|null, week: {...}|null, updatedAt }
+
+function refreshUsage() {
+  for (const [agentId, runtime] of runtimes) {
+    if (runtime.turnStartedAt) continue; // busy with something real
+    if (anyClientViewing(agentId)) continue; // would be visible — skip this round
+    runtime.usageProbe = true;
+    try {
+      runtime.bridge.send('/usage');
+      runtime.turnStartedAt = Date.now();
+    } catch {
+      runtime.usageProbe = false;
+    }
+    return; // usage is account-wide — one probe per cycle is enough
+  }
+}
+
+// Triggered from two places instead of on a timer — usage only actually
+// changes when a real turn finishes (tokens got spent) or when a client
+// freshly connects (worth a check on app load), so anything in between is
+// just the same numbers again.
+
 app.get('/api/roster', requireAuth, (req, res) => {
-  res.json({ agents: buildRoster(), vapidPublicKey: VAPID_PUBLIC_KEY });
+  res.json({ agents: buildRoster(), vapidPublicKey: VAPID_PUBLIC_KEY, usage: latestUsage });
 });
 
 app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
@@ -216,12 +460,62 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
   const runtime = runtimes.get(agent.id);
   res.json({
     messages: store.getMessages(agent.id),
-    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName } : null,
+    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
   });
 });
 
+function broadcastTodos(agentId) {
+  broadcast({ type: 'todos_update', agentId, todos: store.getTodos(agentId) });
+}
+
+app.get('/api/agents/:id/todos', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  res.json({ todos: store.getTodos(agent.id) });
+});
+
+app.post('/api/agents/:id/todos', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  const text = typeof req.body.text === 'string' ? req.body.text.trim().slice(0, 500) : '';
+  if (!text) return res.status(400).json({ error: 'text required' });
+  const todo = store.addTodo(agent.id, text);
+  broadcastTodos(agent.id);
+  res.json({ todo });
+});
+
+app.patch('/api/agents/:id/todos/:todoId', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  const patch = {};
+  if (typeof req.body.text === 'string' && req.body.text.trim()) patch.text = req.body.text.trim().slice(0, 500);
+  if (req.body.status === 'open' || req.body.status === 'done') patch.status = req.body.status;
+  const todo = store.updateTodo(agent.id, req.params.todoId, patch);
+  if (!todo) return res.status(404).json({ error: 'no such todo' });
+  broadcastTodos(agent.id);
+  res.json({ todo });
+});
+
+app.post('/api/agents/:id/todos/:todoId/move', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  const direction = req.body.direction === 'up' || req.body.direction === 'down' ? req.body.direction : null;
+  if (!direction) return res.status(400).json({ error: 'direction must be up or down' });
+  const moved = store.moveTodo(agent.id, req.params.todoId, direction);
+  broadcastTodos(agent.id);
+  res.json({ ok: moved });
+});
+
+app.delete('/api/agents/:id/todos/:todoId', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  const removed = store.removeTodo(agent.id, req.params.todoId);
+  broadcastTodos(agent.id);
+  res.json({ ok: removed });
+});
+
 app.post('/api/agents', requireAuth, (req, res) => {
-  const { name, emoji, color, workdir, systemPrompt } = req.body || {};
+  const { name, emoji, color, workdir, systemPrompt, model } = req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'name required' });
   }
@@ -238,6 +532,9 @@ app.post('/api/agents', requireAuth, (req, res) => {
   if (!stat.isDirectory()) {
     return res.status(400).json({ error: 'working directory is not a directory' });
   }
+  if (model !== undefined && !VALID_MODELS.includes(model)) {
+    return res.status(400).json({ error: `model must be one of: ${VALID_MODELS.join(', ')}` });
+  }
 
   const agent = store.createAgent({
     name: name.trim().slice(0, 60),
@@ -245,10 +542,75 @@ app.post('/api/agents', requireAuth, (req, res) => {
     color: typeof color === 'string' && color ? color : '#7c9cff',
     workdir: dir,
     systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, 4000) : null,
+    model: VALID_MODELS.includes(model) ? model : null,
   });
   startAgentBridge(agent);
   broadcast({ type: 'roster_entry', agent: rosterEntry(agent) });
   res.json({ agent: rosterEntry(agent) });
+});
+
+app.patch('/api/agents/:id', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  const body = req.body || {};
+  const patch = {};
+
+  if (typeof body.name === 'string' && body.name.trim()) patch.name = body.name.trim().slice(0, 60);
+  if (typeof body.emoji === 'string' && body.emoji.trim()) patch.emoji = body.emoji.trim().slice(0, 8);
+  if (typeof body.color === 'string' && body.color) patch.color = body.color;
+
+  // workdir/systemPrompt are baked into the running process's spawn args —
+  // changing them only takes effect once that process is restarted.
+  let bridgeParamsChanged = false;
+  if (typeof body.workdir === 'string' && body.workdir.trim() && body.workdir.trim() !== agent.workdir) {
+    const dir = body.workdir.trim();
+    let stat;
+    try {
+      stat = fs.statSync(dir);
+    } catch {
+      return res.status(400).json({ error: 'working directory does not exist' });
+    }
+    if (!stat.isDirectory()) return res.status(400).json({ error: 'working directory is not a directory' });
+    patch.workdir = dir;
+    bridgeParamsChanged = true;
+  }
+  if (typeof body.systemPrompt === 'string') {
+    const sp = body.systemPrompt.trim() ? body.systemPrompt.trim().slice(0, 4000) : null;
+    if (sp !== agent.systemPrompt) {
+      patch.systemPrompt = sp;
+      bridgeParamsChanged = true;
+    }
+  }
+  // Model is intentionally NOT restarted here, unlike workdir/systemPrompt —
+  // picking a new model shouldn't kill whatever that agent's process is
+  // doing right now. It's just persisted; the WS message handler restarts
+  // the bridge with the new model right before the *next* message is sent,
+  // when there's nothing in flight to disturb.
+  if (typeof body.model === 'string' && body.model !== (agent.model || 'sonnet')) {
+    if (!VALID_MODELS.includes(body.model)) {
+      return res.status(400).json({ error: `model must be one of: ${VALID_MODELS.join(', ')}` });
+    }
+    patch.model = body.model;
+  }
+
+  const updated = store.updateAgent(agent.id, patch);
+  if (bridgeParamsChanged && runtimes.has(agent.id)) {
+    // Restart with the same session id so history/continuity is unaffected —
+    // only the working directory / persona going forward actually changes.
+    stopAgentBridge(agent.id);
+    startAgentBridge(updated);
+  }
+  broadcastRosterEntry(agent.id);
+  res.json({ agent: rosterEntry(updated) });
+});
+
+app.delete('/api/agents/:id', requireAuth, (req, res) => {
+  const agent = store.getAgent(req.params.id);
+  if (!agent) return res.status(404).json({ error: 'no such agent' });
+  stopAgentBridge(agent.id);
+  store.removeAgent(agent.id);
+  broadcast({ type: 'agent_removed', agentId: agent.id });
+  res.json({ ok: true });
 });
 
 app.post('/api/push/subscribe', requireAuth, (req, res) => {
@@ -288,7 +650,8 @@ wss.on('connection', (ws, req) => {
   ws.isVisible = true; // assume foregrounded until told otherwise
   ws.openAgentId = null; // which agent's chat (if any) is the open screen
 
-  ws.send(JSON.stringify({ type: 'hello', agents: buildRoster() }));
+  ws.send(JSON.stringify({ type: 'hello', agents: buildRoster(), usage: latestUsage }));
+  refreshUsage(); // a fresh connection means the app was just (re)opened — worth a check
 
   ws.on('message', (raw) => {
     let msg;
@@ -299,8 +662,35 @@ wss.on('connection', (ws, req) => {
     }
 
     if (msg.type === 'message' && typeof msg.agentId === 'string' && typeof msg.text === 'string' && msg.text.trim()) {
-      const runtime = runtimes.get(msg.agentId);
-      if (!runtime) return;
+      let runtime = runtimes.get(msg.agentId);
+      if (!runtime) {
+        // Asleep (or never started) — waking it is just a normal --resume,
+        // no different from how a brand-new agent starts its first bridge.
+        // This also naturally picks up any pending model switch, since it
+        // reads agent.model fresh from the store.
+        const agent = store.getAgent(msg.agentId);
+        if (!agent) return;
+        runtime = startAgentBridge(agent);
+        broadcastRosterEntry(msg.agentId);
+      } else if (runtime.waitingUntil) {
+        // A new message supersedes whatever was queued for auto-retry —
+        // send this one instead, cancelling the scheduled resend of the
+        // old text so it doesn't also fire later.
+        if (runtime.retryTimeoutId) clearTimeout(runtime.retryTimeoutId);
+        runtime.retryTimeoutId = null;
+        runtime.waitingUntil = null;
+        store.updateAgent(msg.agentId, { waitingUntil: null });
+      } else if (!runtime.turnStartedAt) {
+        // Already awake and idle — apply a pending model switch now, right
+        // before this message, rather than the moment it was picked (which
+        // could have been mid-turn on the old model).
+        const agent = store.getAgent(msg.agentId);
+        if (agent && runtime.bridge.model !== (agent.model || null)) {
+          stopAgentBridge(msg.agentId);
+          runtime = startAgentBridge(agent);
+          broadcastRosterEntry(msg.agentId);
+        }
+      }
       const userMessage = {
         id: randomUUID(),
         role: 'user',
@@ -311,11 +701,27 @@ wss.on('connection', (ws, req) => {
       broadcast({ type: 'user_message', agentId: msg.agentId, message: userMessage });
       try {
         runtime.bridge.send(msg.text);
+        runtime.lastUserText = msg.text;
         runtime.turnStartedAt = Date.now();
         runtime.activeToolName = null;
         broadcastRosterEntry(msg.agentId);
       } catch (err) {
         broadcast({ type: 'system', agentId: msg.agentId, text: `error: ${err.message}` });
+      }
+    } else if (msg.type === 'stop' && typeof msg.agentId === 'string') {
+      const runtime = runtimes.get(msg.agentId);
+      if (runtime && runtime.waitingUntil) {
+        // Nothing is actually running — cancel the scheduled auto-retry
+        // instead of trying to interrupt a live turn that doesn't exist.
+        if (runtime.retryTimeoutId) clearTimeout(runtime.retryTimeoutId);
+        runtime.retryTimeoutId = null;
+        runtime.waitingUntil = null;
+        runtime.turnStartedAt = null;
+        store.updateAgent(msg.agentId, { waitingUntil: null });
+        broadcastRosterEntry(msg.agentId);
+      } else if (runtime && runtime.turnStartedAt) {
+        runtime.interrupted = true;
+        runtime.bridge.interrupt();
       }
     } else if (msg.type === 'view') {
       // Which agent's chat (if any) is currently the open screen on this

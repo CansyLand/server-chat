@@ -143,6 +143,40 @@ html, body {
   padding: 0 4px 0 0;
 }
 .chat-agent-emoji { font-size: 1.2rem; line-height: 1; }
+#chat-agent-name { margin-right: auto; }
+
+#agent-options-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.3rem;
+  line-height: 1;
+  padding: 4px 6px;
+}
+
+#model-select {
+  border: 1px solid #2c2c33;
+  background: #0f0f12;
+  color: var(--text-dim);
+  border-radius: 10px;
+  padding: 4px 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  font-family: inherit;
+  flex-shrink: 0;
+  max-width: 92px;
+}
+
+#new-agent-model {
+  border-radius: 10px;
+  border: 1px solid #2c2c33;
+  background: #0f0f12;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+#new-agent-model:focus, #model-select:focus { outline: none; border-color: var(--accent); }
 
 /* ---- Agent list (landing screen) ---- */
 #agent-list {
@@ -177,6 +211,9 @@ html, body {
   justify-content: center;
   font-size: 1.4rem;
 }
+.agent-row.sleeping .agent-avatar { opacity: 0.45; }
+.agent-row.sleeping .agent-row-name { color: var(--text-dim); font-weight: 500; }
+
 .agent-working-dot {
   position: absolute;
   right: -1px;
@@ -187,6 +224,12 @@ html, body {
   background: #6fd08c;
   border: 2px solid var(--bg);
   animation: work-pulse 1.2s ease-in-out infinite;
+}
+/* Waiting on a clock (rate limit) reads differently from actively
+   crunching — same shape, muted color, no urgency implied. */
+.agent-working-dot.waiting {
+  background: var(--text-dim);
+  animation: none;
 }
 
 .agent-row-body {
@@ -258,6 +301,11 @@ html, body {
   background: #232328;
   color: var(--text);
 }
+#agent-delete-btn {
+  background: none;
+  color: var(--error);
+  border: 1px solid var(--error);
+}
 
 .emoji-picker {
   display: grid;
@@ -286,6 +334,62 @@ header {
   border-bottom: 1px solid #232328;
 }
 header .title { font-weight: 600; }
+
+#usage-bars {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--surface); /* fills the 1px gap between the two bars */
+}
+
+#todo-btn {
+  position: absolute;
+  top: 100%;
+  right: 12px;
+  margin-top: 8px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.todo-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b0b0d;
+  font-size: 0.62rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.usage-bar {
+  height: 1px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+.usage-bar-fill {
+  height: 100%;
+  width: 0%;
+  transition: width 0.4s ease;
+}
+#usage-session-fill { background: var(--accent); }
+#usage-week-fill { background: var(--error); }
+
 #status {
   margin-left: auto;
   font-size: 0.8rem;
@@ -311,7 +415,12 @@ header .title { font-weight: 600; }
   padding: 4px;
 }
 
-#settings-modal, #new-agent-modal {
+/* Every bottom-sheet overlay in this app MUST have this class, or it
+   renders in-flow (pushed below the page, under the composer) instead of
+   as a fixed overlay — this has bitten us twice from forgetting it on a
+   new modal, so it's a shared class applied in the HTML rather than an
+   ID list here that's easy to forget to extend. */
+.modal-overlay {
   position: fixed;
   inset: 0;
   background: rgba(0, 0, 0, 0.5);
@@ -331,6 +440,89 @@ header .title { font-weight: 600; }
   flex-direction: column;
   gap: 12px;
 }
+#todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+  border-bottom: 1px solid #232328;
+}
+.todo-item:last-child { border-bottom: none; }
+.todo-check {
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--text-dim);
+  background: none;
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.todo-item.done .todo-check { border-color: var(--accent); background: var(--accent); color: #0b0b0d; }
+.todo-text {
+  flex: 1;
+  min-width: 0;
+  word-break: break-word;
+}
+.todo-item.done .todo-text { color: var(--text-dim); text-decoration: line-through; }
+.todo-edit-input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: #0f0f12;
+  color: var(--text);
+  padding: 4px 6px;
+  font-size: 1rem;
+  font-family: inherit;
+}
+.todo-actions {
+  flex-shrink: 0;
+  display: flex;
+  gap: 2px;
+}
+.todo-move, .todo-delete {
+  width: 26px;
+  height: 26px;
+  border: none;
+  background: none;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  padding: 0;
+}
+#todo-add-form {
+  display: flex;
+  gap: 8px;
+}
+#todo-add-form input {
+  flex: 1;
+  min-width: 0;
+  border-radius: 10px;
+  border: 1px solid #2c2c33;
+  background: #0f0f12;
+  color: var(--text);
+  padding: 10px 12px;
+  font-size: 0.95rem;
+  font-family: inherit;
+}
+#todo-add-form button {
+  border: none;
+  border-radius: 10px;
+  padding: 10px 16px;
+  background: var(--accent);
+  color: #0b0b0d;
+  font-weight: 600;
+}
+
 .settings-row {
   display: flex;
   justify-content: space-between;
@@ -365,7 +557,12 @@ header .title { font-weight: 600; }
   background: var(--accent);
   color: #0b0b0d;
 }
-#settings-close-btn {
+#settings-restart-btn {
+  background: none;
+  border: 1px solid #2c2c33;
+  color: var(--text-dim);
+}
+#settings-close-btn, #todo-close-btn {
   background: #232328;
   color: var(--text);
 }
@@ -376,6 +573,32 @@ header .title { font-weight: 600; }
   font-size: 0.8rem;
   color: var(--text-dim);
   background: var(--surface);
+}
+
+#connection-banner {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 8px 16px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  text-align: center;
+}
+#connection-banner.reconnecting {
+  background: #3a2c0f;
+  color: #ffcf7a;
+}
+#connection-banner.online {
+  background: #123a22;
+  color: #7be8a5;
+}
+#connection-banner .conn-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: work-pulse 1.2s ease-in-out infinite;
 }
 
 .banner {
@@ -444,6 +667,10 @@ header .title { font-weight: 600; }
   flex-shrink: 0;
   animation: work-pulse 1.2s ease-in-out infinite;
 }
+.msg.live.waiting .work-dot {
+  background: var(--text-dim);
+  animation: none;
+}
 .work-time {
   font-variant-numeric: tabular-nums;
   opacity: 0.85;
@@ -485,14 +712,32 @@ header .title { font-weight: 600; }
   word-break: break-word;
 }
 .bubble pre {
+  position: relative;
   margin: 0.5em 0;
   padding: 10px 12px;
+  padding-right: 34px; /* clearance so the copy button never sits over code text */
   background: rgba(0, 0, 0, 0.25);
   border-radius: 10px;
   max-width: 100%;
   overflow-x: auto;
   -webkit-overflow-scrolling: touch;
 }
+.code-copy-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border: none;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-dim);
+}
+.code-copy-btn:active { background: rgba(255, 255, 255, 0.2); }
+.code-copy-btn.copied { color: #6fd08c; }
 .bubble pre code {
   background: none;
   padding: 0;
@@ -578,6 +823,40 @@ header .title { font-weight: 600; }
 }
 .tool-line.error { color: var(--error); }
 
+#slash-suggestions {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  min-height: 0;
+  max-height: 40vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  background: var(--surface);
+  border-top: 1px solid #232328;
+}
+.slash-suggestion {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  text-align: left;
+  border: none;
+  background: none;
+  color: var(--text);
+  padding: 8px 16px;
+  font-family: inherit;
+  border-bottom: 1px solid #232328;
+}
+.slash-suggestion:active { background: rgba(255, 255, 255, 0.06); }
+.slash-suggestion:last-child { border-bottom: none; }
+.slash-suggestion-name {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9rem;
+}
+.slash-suggestion-desc {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+
 #composer {
   display: flex;
   gap: 8px;
@@ -611,4 +890,7 @@ header .title { font-weight: 600; }
   font-size: 1.1rem;
   font-weight: 700;
   flex-shrink: 0;
+}
+#send-btn.stop-mode {
+  font-size: 0.85rem;
 }

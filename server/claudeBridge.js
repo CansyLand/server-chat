@@ -10,14 +10,16 @@ const WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 // with --resume so the conversation (Claude's own on-disk session history)
 // picks back up rather than starting over.
 export class ClaudeBridge extends EventEmitter {
-  constructor({ sessionId, workdir, systemPrompt } = {}) {
+  constructor({ sessionId, workdir, systemPrompt, model } = {}) {
     super();
     this.sessionId = sessionId || null;
     this.workdir = workdir || WORKDIR;
     this.systemPrompt = systemPrompt || null;
+    this.model = model || null;
     this.child = null;
     this.buf = '';
     this.shuttingDown = false;
+    this.interrupting = false;
     this.currentTurn = null; // { tools: [] } accumulator for the in-flight turn
   }
 
@@ -32,6 +34,9 @@ export class ClaudeBridge extends EventEmitter {
     ];
     if (this.systemPrompt) {
       args.push('--append-system-prompt', this.systemPrompt);
+    }
+    if (this.model) {
+      args.push('--model', this.model);
     }
     if (this.sessionId) {
       args.push('--resume', this.sessionId);
@@ -53,16 +58,34 @@ export class ClaudeBridge extends EventEmitter {
     });
     this.child.on('exit', (code, signal) => {
       this.emit('exit', { code, signal });
-      if (!this.shuttingDown) {
-        this.emit('crash');
-        setTimeout(() => this.start(), 2000);
+      if (this.shuttingDown) return;
+      if (this.interrupting) {
+        // A deliberate stop, not a crash: the CLI handles SIGINT by ending
+        // the current turn cleanly (emits its usual 'result' first) and
+        // exiting 0 — respawn immediately with --resume, no delay, no
+        // 'crash' event, since nothing actually went wrong.
+        this.interrupting = false;
+        this.start();
+        return;
       }
+      this.emit('crash');
+      setTimeout(() => this.start(), 2000);
     });
   }
 
   stop() {
     this.shuttingDown = true;
     if (this.child) this.child.kill('SIGTERM');
+  }
+
+  // Interrupts the in-flight turn only — verified empirically that the CLI
+  // responds to SIGINT by emitting a normal 'result' event (marked as an
+  // error/incomplete) for whatever was generated so far, then exits 0,
+  // rather than being killed mid-write or hanging.
+  interrupt() {
+    if (!this.child) return;
+    this.interrupting = true;
+    this.child.kill('SIGINT');
   }
 
   send(text) {
@@ -98,7 +121,11 @@ export class ClaudeBridge extends EventEmitter {
       case 'system':
         if (obj.subtype === 'init') {
           this.sessionId = obj.session_id;
-          this.emit('ready', { sessionId: this.sessionId });
+          // The CLI reports its own currently-available slash commands
+          // (built-ins + whatever skills/plugins/custom commands are
+          // installed) on every session start — forwarding this straight
+          // through means the suggestion list is never our own stale copy.
+          this.emit('ready', { sessionId: this.sessionId, slashCommands: obj.slash_commands || [] });
         }
         break;
 

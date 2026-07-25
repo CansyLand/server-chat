@@ -11,6 +11,10 @@ function messagesFile(agentId) {
   return path.join(DATA_DIR, `agent-${agentId}-messages.json`);
 }
 
+function todosFile(agentId) {
+  return path.join(DATA_DIR, `agent-${agentId}-todos.json`);
+}
+
 function readJson(file, fallback) {
   try {
     return { ...fallback, ...JSON.parse(fs.readFileSync(file, 'utf8')) };
@@ -50,6 +54,7 @@ function migrateLegacyIfNeeded() {
         color: '#7c9cff',
         workdir: process.env.CLAUDE_WORKDIR || process.env.HOME,
         systemPrompt: null,
+        model: null,
         sessionId: legacy.sessionId,
         createdAt: Date.now(),
       },
@@ -97,6 +102,19 @@ function saveMessages(agentId) {
   debounced(`messages:${agentId}`, () => writeJson(messagesFile(agentId), loadMessages(agentId)));
 }
 
+const todoState = new Map(); // agentId -> { todos: [] }
+
+function loadTodos(agentId) {
+  if (!todoState.has(agentId)) {
+    todoState.set(agentId, readJson(todosFile(agentId), { todos: [] }));
+  }
+  return todoState.get(agentId);
+}
+
+function saveTodos(agentId) {
+  debounced(`todos:${agentId}`, () => writeJson(todosFile(agentId), loadTodos(agentId)));
+}
+
 export const store = {
   // ---- device: pairing + push subscription belong to the physical device,
   // not to any one agent — a device stays paired across every agent it talks to.
@@ -122,7 +140,7 @@ export const store = {
   getAgent(id) {
     return agentsState.agents.find((a) => a.id === id) || null;
   },
-  createAgent({ name, emoji, color, workdir, systemPrompt }) {
+  createAgent({ name, emoji, color, workdir, systemPrompt, model }) {
     const agent = {
       id: randomUUID().slice(0, 8),
       name,
@@ -130,6 +148,7 @@ export const store = {
       color,
       workdir,
       systemPrompt: systemPrompt || null,
+      model: model || null,
       sessionId: null,
       createdAt: Date.now(),
     };
@@ -143,6 +162,29 @@ export const store = {
       agent.sessionId = sessionId;
       saveAgents();
     }
+  },
+  updateAgent(id, patch) {
+    const agent = this.getAgent(id);
+    if (!agent) return null;
+    Object.assign(agent, patch);
+    saveAgents();
+    return agent;
+  },
+  removeAgent(id) {
+    const idx = agentsState.agents.findIndex((a) => a.id === id);
+    if (idx === -1) return false;
+    agentsState.agents.splice(idx, 1);
+    saveAgents();
+    messageState.delete(id);
+    todoState.delete(id);
+    for (const file of [messagesFile(id), todosFile(id)]) {
+      try {
+        fs.unlinkSync(file);
+      } catch {
+        /* already gone / never written — fine */
+      }
+    }
+    return true;
   },
 
   // ---- per-agent messages ----
@@ -171,5 +213,49 @@ export const store = {
       s.unreadCount = 0;
       saveMessages(agentId);
     }
+  },
+
+  // ---- per-agent todos: a lightweight task list, separate from chat
+  // history. Order is just array order — reordering means moving an
+  // element, not a separate sort field. ----
+  getTodos(agentId) {
+    return loadTodos(agentId).todos;
+  },
+  addTodo(agentId, text) {
+    const todo = {
+      id: randomUUID().slice(0, 8),
+      text,
+      status: 'open', // 'open' | 'done' — removal is a separate, explicit step
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    loadTodos(agentId).todos.push(todo);
+    saveTodos(agentId);
+    return todo;
+  },
+  updateTodo(agentId, todoId, patch) {
+    const todo = loadTodos(agentId).todos.find((t) => t.id === todoId);
+    if (!todo) return null;
+    Object.assign(todo, patch, { updatedAt: Date.now() });
+    saveTodos(agentId);
+    return todo;
+  },
+  moveTodo(agentId, todoId, direction) {
+    const list = loadTodos(agentId).todos;
+    const idx = list.findIndex((t) => t.id === todoId);
+    if (idx === -1) return false;
+    const swapIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (swapIdx < 0 || swapIdx >= list.length) return false;
+    [list[idx], list[swapIdx]] = [list[swapIdx], list[idx]];
+    saveTodos(agentId);
+    return true;
+  },
+  removeTodo(agentId, todoId) {
+    const list = loadTodos(agentId).todos;
+    const idx = list.findIndex((t) => t.id === todoId);
+    if (idx === -1) return false;
+    list.splice(idx, 1);
+    saveTodos(agentId);
+    return true;
   },
 };

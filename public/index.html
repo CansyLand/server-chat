@@ -32,6 +32,8 @@
 
 <div id="app" hidden>
 
+  <div id="connection-banner" hidden></div>
+
   <p id="gate-hint" hidden class="hint">Add this to your Home Screen, then open it from there to enable notifications (iOS requirement).</p>
 
   <div id="auth-banner" hidden class="banner">
@@ -57,20 +59,34 @@
       <button id="back-btn" type="button" aria-label="Back to agent list">←</button>
       <span id="chat-agent-emoji" class="chat-agent-emoji"></span>
       <span id="chat-agent-name" class="title"></span>
+      <select id="model-select" aria-label="Model">
+        <option value="haiku">Haiku 4.5</option>
+        <option value="sonnet">Sonnet 5</option>
+        <option value="opus">Opus 5</option>
+        <option value="fable">Fable 5</option>
+      </select>
+      <button id="agent-options-btn" type="button" aria-label="Agent options">⋯</button>
     </header>
+    <div id="usage-bars">
+      <div class="usage-bar" id="usage-week-bar"><div class="usage-bar-fill" id="usage-week-fill"></div></div>
+      <div class="usage-bar" id="usage-session-bar"><div class="usage-bar-fill" id="usage-session-fill"></div></div>
+      <button id="todo-btn" type="button" aria-label="Tasks">✅<span id="todo-badge" class="todo-badge" hidden>0</span></button>
+    </div>
     <main id="messages"></main>
+    <div id="slash-suggestions" hidden></div>
     <form id="composer">
       <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>
-      <button type="submit" aria-label="Send">↑</button>
+      <button type="submit" id="send-btn" aria-label="Send">↑</button>
     </form>
   </div>
 
 </div>
 
-<div id="new-agent-modal" hidden>
+<div id="new-agent-modal" class="modal-overlay" hidden>
   <div class="settings-sheet">
-    <h2 class="sheet-title">New agent</h2>
+    <h2 class="sheet-title" id="agent-form-title">New agent</h2>
     <form id="new-agent-form">
+      <input type="hidden" id="agent-form-id" value="" />
       <label class="field-label" for="new-agent-name">Name</label>
       <input id="new-agent-name" type="text" maxlength="60" placeholder="e.g. Art" autocomplete="off" required />
 
@@ -87,6 +103,14 @@
         <button type="button" class="theme-swatch" data-color="#b58bff" style="--sw:#b58bff" aria-label="Violet"></button>
       </div>
 
+      <label class="field-label" for="new-agent-model">Model</label>
+      <select id="new-agent-model">
+        <option value="haiku">Haiku 4.5</option>
+        <option value="sonnet" selected>Sonnet 5</option>
+        <option value="opus">Opus 5</option>
+        <option value="fable">Fable 5</option>
+      </select>
+
       <label class="field-label" for="new-agent-workdir">Working directory</label>
       <input id="new-agent-workdir" type="text" placeholder="/home/cansy" autocomplete="off" />
 
@@ -97,11 +121,24 @@
 
       <button type="submit" id="new-agent-submit">Create agent</button>
       <button type="button" id="new-agent-cancel">Cancel</button>
+      <button type="button" id="agent-delete-btn" hidden>Delete agent</button>
     </form>
   </div>
 </div>
 
-<div id="settings-modal" hidden>
+<div id="todo-modal" class="modal-overlay" hidden>
+  <div class="settings-sheet todo-sheet">
+    <h2 class="sheet-title">Tasks</h2>
+    <div id="todo-list"></div>
+    <form id="todo-add-form">
+      <input id="todo-add-input" type="text" placeholder="Add a task…" autocomplete="off" maxlength="500" />
+      <button type="submit">Add</button>
+    </form>
+    <button type="button" id="todo-close-btn">Close</button>
+  </div>
+</div>
+
+<div id="settings-modal" class="modal-overlay" hidden>
   <div class="settings-sheet">
     <div class="settings-row">
       <span>Version</span>
@@ -119,6 +156,7 @@
       </div>
     </div>
     <button id="settings-update-btn" type="button">Check for updates</button>
+    <button id="settings-restart-btn" type="button">Restart service</button>
     <button id="settings-close-btn" type="button">Close</button>
   </div>
 </div>

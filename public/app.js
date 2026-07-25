@@ -6,18 +6,37 @@ const messagesEl = $('#messages');
 const chatAgentEmojiEl = $('#chat-agent-emoji');
 const chatAgentNameEl = $('#chat-agent-name');
 const backBtn = $('#back-btn');
+const agentOptionsBtn = $('#agent-options-btn');
+const modelSelect = $('#model-select');
+const usageSessionBar = $('#usage-session-bar');
+const usageSessionFill = $('#usage-session-fill');
+const usageWeekBar = $('#usage-week-bar');
+const usageWeekFill = $('#usage-week-fill');
+const todoBtn = $('#todo-btn');
+const todoBadge = $('#todo-badge');
+const todoModal = $('#todo-modal');
+const todoListEl = $('#todo-list');
+const todoAddForm = $('#todo-add-form');
+const todoAddInput = $('#todo-add-input');
+const todoCloseBtn = $('#todo-close-btn');
 const newAgentBtn = $('#new-agent-btn');
 const newAgentModal = $('#new-agent-modal');
 const newAgentForm = $('#new-agent-form');
+const agentFormTitleEl = $('#agent-form-title');
+const agentFormIdInput = $('#agent-form-id');
 const newAgentNameInput = $('#new-agent-name');
 const newAgentWorkdirInput = $('#new-agent-workdir');
 const newAgentPersonaInput = $('#new-agent-persona');
 const newAgentErrorEl = $('#new-agent-error');
 const newAgentSubmitBtn = $('#new-agent-submit');
 const newAgentCancelBtn = $('#new-agent-cancel');
+const agentDeleteBtn = $('#agent-delete-btn');
 const emojiPickerEl = $('#emoji-picker');
+const newAgentModelSelect = $('#new-agent-model');
 const formEl = $('#composer');
 const inputEl = $('#input');
+const sendBtn = $('#send-btn');
+const slashSuggestionsEl = $('#slash-suggestions');
 const statusEl = $('#status');
 const notifyBtn = $('#notify-btn');
 const gateEl = $('#gate');
@@ -27,6 +46,7 @@ const settingsBtn = $('#settings-btn');
 const settingsModal = $('#settings-modal');
 const settingsVersionEl = $('#settings-version');
 const settingsUpdateBtn = $('#settings-update-btn');
+const settingsRestartBtn = $('#settings-restart-btn');
 const settingsCloseBtn = $('#settings-close-btn');
 
 // A new service worker taking over mid-session means a fresh deploy just
@@ -185,6 +205,16 @@ async function boot(token) {
       for (const agent of data.agents) roster.set(agent.id, agent);
       renderAgentList();
       setBadgeLocal(totalUnreadFromRoster());
+      renderUsage(data.usage);
+
+      // Cold-start deep link from a notification tap that had to launch the
+      // app fresh (no running tab for the service worker to postMessage
+      // into) — see service-worker.js's openWindow fallback.
+      const deepLinkAgentId = new URLSearchParams(location.search).get('agent');
+      if (deepLinkAgentId) {
+        history.replaceState(null, '', location.pathname + location.hash);
+        if (roster.has(deepLinkAgentId)) openAgent(deepLinkAgentId);
+      }
     }
   } catch (err) {
     setStatus('offline — retrying…', false);
@@ -195,6 +225,8 @@ async function boot(token) {
   setupVisibility(token);
   setupSettings(token);
   setupNewAgent(token);
+  setupModelPicker(token);
+  setupTodos(token);
   setupNav();
 }
 
@@ -237,7 +269,7 @@ function formatPreviewTime(ts) {
 function buildAgentRow(entry) {
   const row = document.createElement('button');
   row.type = 'button';
-  row.className = 'agent-row';
+  row.className = 'agent-row' + (entry.sleeping && !entry.working ? ' sleeping' : '');
   row.dataset.agentId = entry.id;
 
   const avatar = document.createElement('span');
@@ -246,19 +278,21 @@ function buildAgentRow(entry) {
   avatar.textContent = entry.emoji || '🤖';
   if (entry.working) {
     const dot = document.createElement('span');
-    dot.className = 'agent-working-dot';
+    dot.className = 'agent-working-dot' + (entry.working.waitingUntil ? ' waiting' : '');
     avatar.appendChild(dot);
   }
 
   const body = document.createElement('span');
   body.className = 'agent-row-body';
+  const asleep = entry.sleeping && !entry.working;
   const nameLine = document.createElement('span');
   nameLine.className = 'agent-row-name';
-  nameLine.textContent = entry.name;
+  nameLine.textContent = (asleep ? '💤 ' : '') + entry.name;
+  if (asleep) nameLine.title = 'Asleep — will wake on your next message';
   const preview = document.createElement('span');
   preview.className = 'agent-row-preview';
   preview.textContent = entry.working
-    ? 'Working…'
+    ? (entry.working.waitingUntil ? `Rate limited — resumes ${formatResumeTime(entry.working.waitingUntil)}` : 'Working…')
     : entry.lastMessage
       ? (entry.lastMessage.role === 'user' ? 'You: ' : '') + extractOptions(entry.lastMessage.text).cleanText.slice(0, 80)
       : 'No messages yet';
@@ -282,8 +316,41 @@ function buildAgentRow(entry) {
   return row;
 }
 
+// ---- Composer drafts: one unfinished message per agent, saved to
+// localStorage (not just a JS variable) so a half-written thought survives
+// switching to another agent, backgrounding the app, or iOS fully killing
+// the PWA — not just navigating away within the app.
+const DRAFTS_KEY = 'xqlytskg_drafts';
+
+function loadDrafts() {
+  try {
+    return JSON.parse(localStorage.getItem(DRAFTS_KEY) || '{}');
+  } catch {
+    return {};
+  }
+}
+
+function getDraft(agentId) {
+  return agentId ? loadDrafts()[agentId] || '' : '';
+}
+
+function saveDraft(agentId, text) {
+  if (!agentId) return;
+  const drafts = loadDrafts();
+  if (text) drafts[agentId] = text;
+  else delete drafts[agentId];
+  localStorage.setItem(DRAFTS_KEY, JSON.stringify(drafts));
+}
+
+function autoResizeInput() {
+  inputEl.style.height = 'auto';
+  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+}
+
 function showListView() {
+  if (currentAgentId) saveDraft(currentAgentId, inputEl.value);
   currentAgentId = null;
+  inputEl.value = '';
   chatViewEl.hidden = true;
   listViewEl.hidden = false;
   resetWorkIndicatorState(); // stop the per-second timer for the chat we're leaving
@@ -294,18 +361,32 @@ function showListView() {
 }
 
 async function openAgent(agentId) {
+  if (currentAgentId && currentAgentId !== agentId) saveDraft(currentAgentId, inputEl.value);
   const entry = roster.get(agentId);
   currentAgentId = agentId;
   chatAgentEmojiEl.textContent = entry?.emoji || '🤖';
   chatAgentNameEl.textContent = entry?.name || '';
+  modelSelect.value = entry?.model || 'sonnet';
   listViewEl.hidden = true;
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
   resetWorkIndicatorState();
+  inputEl.value = getDraft(agentId);
+  autoResizeInput();
+  updateSendButtonMode();
+  hideSlashSuggestions();
+  todoModal.hidden = true; // defensive — shouldn't be reachable while open, but don't leave it stuck
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'view', agentId }));
   }
+
+  fetchTodos(agentId).then((todos) => {
+    if (currentAgentId === agentId) {
+      currentTodos = todos;
+      renderTodoBadge(todos);
+    }
+  });
 
   try {
     const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/messages`, {
@@ -314,7 +395,7 @@ async function openAgent(agentId) {
     const data = await res.json();
     for (const m of data.messages || []) renderMessage(m);
     scrollToBottom();
-    if (data.working) startWorkIndicator(data.working.startedAt, data.working.tool);
+    if (data.working) startWorkIndicator(data.working.startedAt, data.working.tool, data.working.waitingUntil);
   } catch {
     /* WS will surface connectivity issues via the list-view status line */
   }
@@ -329,7 +410,7 @@ function setupNav() {
   backBtn.addEventListener('click', showListView);
 }
 
-// ---- New agent creation ----
+// ---- Agent creation / editing (one sheet, two modes) ----
 const AGENT_EMOJIS = [
   '🛠️', '🎨', '🧠', '🔬', '🧪', '📊', '💼', '📈', '🎯', '🎭', '🎬', '🎵',
   '📚', '✍️', '🍳', '🌱', '🧭', '🔐', '🚀', '🗺️', '⚖️', '🧵', '🐛', '🤖',
@@ -353,17 +434,39 @@ function buildEmojiPicker() {
 }
 buildEmojiPicker();
 
+function setColorSelection(color) {
+  selectedColor = color;
+  for (const b of document.querySelectorAll('#new-agent-colors .theme-swatch')) {
+    b.classList.toggle('active', b.dataset.color === color);
+  }
+}
+
+// agentId === null opens the sheet in "create" mode; otherwise it's
+// pre-filled from the roster entry and switches to "edit" mode (PATCH +
+// a Delete button) instead of creating a new agent.
+function openAgentForm(agentId) {
+  const entry = agentId ? roster.get(agentId) : null;
+  agentFormIdInput.value = agentId || '';
+  agentFormTitleEl.textContent = entry ? 'Edit agent' : 'New agent';
+  newAgentSubmitBtn.textContent = entry ? 'Save changes' : 'Create agent';
+  agentDeleteBtn.hidden = !entry;
+  newAgentErrorEl.hidden = true;
+
+  newAgentNameInput.value = entry?.name || '';
+  newAgentWorkdirInput.value = entry?.workdir || '';
+  newAgentPersonaInput.value = entry?.systemPrompt || '';
+  selectedEmoji = entry?.emoji || AGENT_EMOJIS[0];
+  buildEmojiPicker();
+  setColorSelection(entry?.color || '#7c9cff');
+  newAgentModelSelect.value = entry?.model || 'sonnet';
+
+  newAgentModal.hidden = false;
+}
+
 function setupNewAgent(token) {
-  newAgentBtn.addEventListener('click', () => {
-    newAgentForm.reset();
-    newAgentErrorEl.hidden = true;
-    selectedEmoji = AGENT_EMOJIS[0];
-    selectedColor = '#7c9cff';
-    buildEmojiPicker();
-    for (const b of document.querySelectorAll('#new-agent-colors .theme-swatch')) {
-      b.classList.toggle('active', b.dataset.color === selectedColor);
-    }
-    newAgentModal.hidden = false;
+  newAgentBtn.addEventListener('click', () => openAgentForm(null));
+  agentOptionsBtn.addEventListener('click', () => {
+    if (currentAgentId) openAgentForm(currentAgentId);
   });
 
   newAgentCancelBtn.addEventListener('click', () => {
@@ -375,20 +478,18 @@ function setupNewAgent(token) {
   });
 
   for (const btn of document.querySelectorAll('#new-agent-colors .theme-swatch')) {
-    btn.addEventListener('click', () => {
-      selectedColor = btn.dataset.color;
-      for (const b of document.querySelectorAll('#new-agent-colors .theme-swatch')) b.classList.toggle('active', b === btn);
-    });
+    btn.addEventListener('click', () => setColorSelection(btn.dataset.color));
   }
 
   newAgentForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     newAgentErrorEl.hidden = true;
+    const editingId = agentFormIdInput.value || null;
     newAgentSubmitBtn.disabled = true;
-    newAgentSubmitBtn.textContent = 'Creating…';
+    newAgentSubmitBtn.textContent = editingId ? 'Saving…' : 'Creating…';
     try {
-      const res = await fetch('/api/agents', {
-        method: 'POST',
+      const res = await fetch(editingId ? `/api/agents/${encodeURIComponent(editingId)}` : '/api/agents', {
+        method: editingId ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
         body: JSON.stringify({
           name: newAgentNameInput.value,
@@ -396,24 +497,277 @@ function setupNewAgent(token) {
           color: selectedColor,
           workdir: newAgentWorkdirInput.value,
           systemPrompt: newAgentPersonaInput.value,
+          model: newAgentModelSelect.value,
         }),
       });
       const data = await res.json();
       if (!res.ok) {
-        newAgentErrorEl.textContent = data.error || 'Could not create agent.';
+        newAgentErrorEl.textContent = data.error || 'Could not save agent.';
         newAgentErrorEl.hidden = false;
         return;
       }
       roster.set(data.agent.id, data.agent);
       newAgentModal.hidden = true;
       renderAgentList();
-      openAgent(data.agent.id);
+      if (editingId && currentAgentId === editingId) {
+        chatAgentEmojiEl.textContent = data.agent.emoji;
+        chatAgentNameEl.textContent = data.agent.name;
+      } else if (!editingId) {
+        openAgent(data.agent.id);
+      }
     } catch {
       newAgentErrorEl.textContent = 'Network error — try again.';
       newAgentErrorEl.hidden = false;
     } finally {
       newAgentSubmitBtn.disabled = false;
-      newAgentSubmitBtn.textContent = 'Create agent';
+      newAgentSubmitBtn.textContent = editingId ? 'Save changes' : 'Create agent';
+    }
+  });
+
+  agentDeleteBtn.addEventListener('click', async () => {
+    const agentId = agentFormIdInput.value;
+    if (!agentId) return;
+    const entry = roster.get(agentId);
+    if (!confirm(`Delete ${entry?.name || 'this agent'}? This removes its chat history from this app permanently.`)) {
+      return;
+    }
+    agentDeleteBtn.disabled = true;
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        newAgentErrorEl.textContent = data.error || 'Could not delete agent.';
+        newAgentErrorEl.hidden = false;
+        return;
+      }
+      roster.delete(agentId);
+      newAgentModal.hidden = true;
+      if (currentAgentId === agentId) showListView();
+      else renderAgentList();
+      saveDraft(agentId, ''); // purge — showListView() above may have just re-saved a stale one
+    } catch {
+      newAgentErrorEl.textContent = 'Network error — try again.';
+      newAgentErrorEl.hidden = false;
+    } finally {
+      agentDeleteBtn.disabled = false;
+    }
+  });
+}
+
+// ---- Quick model switch (chat header) — separate from the full edit form
+// since this is meant for fast, frequent switching mid-conversation based
+// on how demanding the next task is, not a one-time setup choice.
+// Picking a model here doesn't touch the running process — the server
+// just records the choice and applies it (restarting that agent's bridge,
+// same session) right before the *next* message is sent, so it never
+// interrupts whatever's currently in flight.
+function setupModelPicker(token) {
+  modelSelect.addEventListener('change', async () => {
+    const agentId = currentAgentId;
+    if (!agentId) return;
+    const model = modelSelect.value;
+    const previousModel = roster.get(agentId)?.model || 'sonnet';
+    try {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ model }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        modelSelect.value = previousModel;
+        setStatus(data.error || 'Could not switch model', false);
+        return;
+      }
+      roster.set(data.agent.id, data.agent);
+    } catch {
+      modelSelect.value = previousModel;
+      setStatus('offline — try again', false);
+    }
+  });
+}
+
+// ---- Todos: a lightweight per-agent task list, separate from chat history.
+// Three effective states: open -> done (either of us can mark it) -> gone
+// (removal is meant to be a deliberate step, typically after verifying the
+// work — nothing here stops either side from deleting, but the workflow is
+// "AI checks it off, human removes it once actually confirmed").
+let currentTodos = [];
+
+function renderTodoBadge(todos) {
+  const openCount = todos.filter((t) => t.status !== 'done').length;
+  todoBadge.textContent = openCount > 99 ? '99+' : String(openCount);
+  todoBadge.hidden = openCount === 0;
+}
+
+function buildTodoItem(todo) {
+  const el = document.createElement('div');
+  el.className = 'todo-item' + (todo.status === 'done' ? ' done' : '');
+
+  const checkBtn = document.createElement('button');
+  checkBtn.type = 'button';
+  checkBtn.className = 'todo-check';
+  checkBtn.setAttribute('aria-label', todo.status === 'done' ? 'Mark not done' : 'Mark done');
+  checkBtn.textContent = todo.status === 'done' ? '✓' : '';
+  checkBtn.addEventListener('click', () => {
+    patchTodo(todo.id, { status: todo.status === 'done' ? 'open' : 'done' });
+  });
+
+  const textEl = document.createElement('span');
+  textEl.className = 'todo-text';
+  textEl.textContent = todo.text;
+  textEl.addEventListener('click', () => startEditingTodo(textEl, todo));
+
+  const actions = document.createElement('div');
+  actions.className = 'todo-actions';
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button';
+  upBtn.className = 'todo-move';
+  upBtn.textContent = '↑';
+  upBtn.setAttribute('aria-label', 'Move up');
+  upBtn.addEventListener('click', () => moveTodo(todo.id, 'up'));
+  const downBtn = document.createElement('button');
+  downBtn.type = 'button';
+  downBtn.className = 'todo-move';
+  downBtn.textContent = '↓';
+  downBtn.setAttribute('aria-label', 'Move down');
+  downBtn.addEventListener('click', () => moveTodo(todo.id, 'down'));
+  const delBtn = document.createElement('button');
+  delBtn.type = 'button';
+  delBtn.className = 'todo-delete';
+  delBtn.textContent = '🗑';
+  delBtn.setAttribute('aria-label', 'Delete task');
+  delBtn.addEventListener('click', () => {
+    if (confirm('Remove this task?')) deleteTodo(todo.id);
+  });
+  actions.append(upBtn, downBtn, delBtn);
+
+  el.append(checkBtn, textEl, actions);
+  return el;
+}
+
+function startEditingTodo(textEl, todo) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'todo-edit-input';
+  input.value = todo.text;
+  input.maxLength = 500;
+  textEl.replaceWith(input);
+  input.focus();
+  input.select();
+
+  const finish = (save) => {
+    if (save && input.value.trim() && input.value.trim() !== todo.text) {
+      patchTodo(todo.id, { text: input.value.trim() });
+    } else if (input.isConnected) {
+      input.replaceWith(textEl); // cancelled/unchanged — just revert visually
+    }
+  };
+  input.addEventListener('blur', () => finish(true));
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      input.blur();
+    } else if (e.key === 'Escape') {
+      finish(false);
+    }
+  });
+}
+
+function renderTodoList(todos) {
+  todoListEl.innerHTML = '';
+  if (!todos.length) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = 'No tasks yet.';
+    todoListEl.appendChild(empty);
+    return;
+  }
+  for (const todo of todos) todoListEl.appendChild(buildTodoItem(todo));
+}
+
+async function fetchTodos(agentId) {
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/todos`, {
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+    const data = await res.json();
+    return data.todos || [];
+  } catch {
+    return [];
+  }
+}
+
+async function patchTodo(todoId, patch) {
+  if (!currentAgentId) return;
+  try {
+    await fetch(`/api/agents/${encodeURIComponent(currentAgentId)}/todos/${encodeURIComponent(todoId)}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+      body: JSON.stringify(patch),
+    });
+  } catch {
+    /* the todos_update broadcast (or lack thereof) is the source of truth */
+  }
+}
+
+async function moveTodo(todoId, direction) {
+  if (!currentAgentId) return;
+  try {
+    await fetch(`/api/agents/${encodeURIComponent(currentAgentId)}/todos/${encodeURIComponent(todoId)}/move`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${currentToken}` },
+      body: JSON.stringify({ direction }),
+    });
+  } catch {
+    /* ignore — see patchTodo */
+  }
+}
+
+async function deleteTodo(todoId) {
+  if (!currentAgentId) return;
+  try {
+    await fetch(`/api/agents/${encodeURIComponent(currentAgentId)}/todos/${encodeURIComponent(todoId)}`, {
+      method: 'DELETE',
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+  } catch {
+    /* ignore — see patchTodo */
+  }
+}
+
+async function openTodoPanel() {
+  if (!currentAgentId) return;
+  todoModal.hidden = false;
+  currentTodos = await fetchTodos(currentAgentId);
+  renderTodoList(currentTodos);
+  renderTodoBadge(currentTodos);
+}
+
+function setupTodos(token) {
+  todoBtn.addEventListener('click', openTodoPanel);
+  todoCloseBtn.addEventListener('click', () => {
+    todoModal.hidden = true;
+  });
+  todoModal.addEventListener('click', (e) => {
+    if (e.target === todoModal) todoModal.hidden = true;
+  });
+  todoAddForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const text = todoAddInput.value.trim();
+    if (!text || !currentAgentId) return;
+    todoAddInput.value = '';
+    try {
+      await fetch(`/api/agents/${encodeURIComponent(currentAgentId)}/todos`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ text }),
+      });
+    } catch {
+      /* ignore — see patchTodo */
     }
   });
 }
@@ -454,6 +808,24 @@ function setupSettings(token) {
     location.reload();
   });
 
+  settingsRestartBtn.addEventListener('click', async () => {
+    if (!confirm('Restart the chat service? All agents briefly disconnect (a few seconds) while it comes back up.')) {
+      return;
+    }
+    settingsRestartBtn.disabled = true;
+    settingsRestartBtn.textContent = 'Restarting…';
+    try {
+      await fetch('/api/restart', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+    } catch {
+      // The server may already be tearing down by the time this rejects —
+      // expected, not a real failure. Either way the connection banner
+      // (reconnecting… → back online) is what actually shows progress.
+    }
+    settingsModal.hidden = true;
+    settingsRestartBtn.disabled = false;
+    settingsRestartBtn.textContent = 'Restart service';
+  });
+
   for (const btn of document.querySelectorAll('#theme-swatches .theme-swatch')) {
     btn.addEventListener('click', () => {
       const theme = btn.dataset.theme;
@@ -490,6 +862,34 @@ let reconnectDelay = 1000;
 let liveBubble = null;
 let consecutiveAuthFailures = 0;
 
+// ---- Connection banner: visible across both the list and chat views
+// (unlike the small #status text, which only lives in the list header) —
+// specifically so a server restart/deploy is impossible to miss regardless
+// of where you're looking in the app. "online" is only shown as a brief
+// confirmation after an actual drop, never on the first-ever connect.
+const connBannerEl = $('#connection-banner');
+let everConnected = false;
+let onlineBannerTimer = null;
+
+function showConnBanner(text, kind) {
+  clearTimeout(onlineBannerTimer);
+  connBannerEl.className = kind;
+  connBannerEl.innerHTML = `<span class="conn-dot"></span><span>${text}</span>`;
+  connBannerEl.hidden = false;
+}
+
+function hideConnBanner() {
+  connBannerEl.hidden = true;
+}
+
+function connBannerOnline() {
+  clearTimeout(onlineBannerTimer);
+  connBannerEl.className = 'online';
+  connBannerEl.innerHTML = '<span class="conn-dot"></span><span>Back online</span>';
+  connBannerEl.hidden = false;
+  onlineBannerTimer = setTimeout(hideConnBanner, 2500);
+}
+
 function connectSocket(token) {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws?token=${encodeURIComponent(token)}`);
@@ -499,6 +899,9 @@ function connectSocket(token) {
     reconnectDelay = 1000;
     consecutiveAuthFailures = 0;
     hideAuthWarning();
+    if (everConnected) connBannerOnline();
+    else hideConnBanner();
+    everConnected = true;
     ws.send(JSON.stringify({ type: 'visibility', visible: !document.hidden }));
     if (currentAgentId) ws.send(JSON.stringify({ type: 'view', agentId: currentAgentId }));
   };
@@ -512,18 +915,22 @@ function connectSocket(token) {
       showAuthWarning();
       if (consecutiveAuthFailures >= 2) {
         setStatus('not authorized', false);
+        hideConnBanner(); // the auth banner already covers this terminal state
         return;
       }
       setStatus('reconnecting…', false);
+      showConnBanner('Reconnecting to server…', 'reconnecting');
       setTimeout(() => connectSocket(token), reconnectDelay);
       return;
     }
     if (ev.code === 4290) {
       setStatus('rate limited — waiting…', false);
+      showConnBanner('Rate limited — waiting…', 'reconnecting');
       setTimeout(() => connectSocket(token), 60000);
       return;
     }
     setStatus('reconnecting…', false);
+    showConnBanner('Reconnecting to server…', 'reconnecting');
     setTimeout(() => connectSocket(token), reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.6, 20000);
   };
@@ -543,20 +950,45 @@ function handleServerEvent(msg) {
       for (const agent of msg.agents) roster.set(agent.id, agent);
       if (!listViewEl.hidden) renderAgentList();
       setBadgeLocal(totalUnreadFromRoster());
-      if (currentAgentId && !roster.has(currentAgentId)) showListView();
-      else if (currentAgentId) {
-        // Reconnect while a chat was open — resync that chat's live state
-        // (e.g. the working indicator) without losing scroll/history.
-        const entry = roster.get(currentAgentId);
-        resetWorkIndicatorState();
-        if (entry?.working) startWorkIndicator(entry.working.startedAt, entry.working.tool);
-        ws.send(JSON.stringify({ type: 'view', agentId: currentAgentId }));
+      renderUsage(msg.usage);
+      if (currentAgentId && !roster.has(currentAgentId)) {
+        showListView();
+      } else if (currentAgentId) {
+        // Reconnect while a chat was open — the socket may have been dead
+        // for a while (backgrounded/suspended on iOS commonly kills it),
+        // so the DOM's existing messages and work-indicator state can't be
+        // trusted: a reply may have finished and broadcast while nothing
+        // was listening. Re-fetch this agent's actual current state from
+        // the server, exactly like freshly opening it, instead of trying
+        // to patch up what's already on screen.
+        openAgent(currentAgentId);
       }
       break;
 
     case 'roster_entry':
       roster.set(msg.agent.id, msg.agent);
       if (!listViewEl.hidden) renderAgentList();
+      if (currentAgentId === msg.agent.id) modelSelect.value = msg.agent.model || 'sonnet';
+      setBadgeLocal(totalUnreadFromRoster());
+      break;
+
+    case 'usage_update':
+      renderUsage(msg.usage);
+      break;
+
+    case 'todos_update':
+      if (msg.agentId === currentAgentId) {
+        currentTodos = msg.todos;
+        renderTodoBadge(currentTodos);
+        if (!todoModal.hidden) renderTodoList(currentTodos);
+      }
+      break;
+
+    case 'agent_removed':
+      roster.delete(msg.agentId);
+      if (currentAgentId === msg.agentId) showListView();
+      else if (!listViewEl.hidden) renderAgentList();
+      saveDraft(msg.agentId, ''); // purge — showListView() above may have just re-saved a stale one
       setBadgeLocal(totalUnreadFromRoster());
       break;
 
@@ -584,6 +1016,20 @@ function handleServerEvent(msg) {
       if (msg.agentId === currentAgentId) setWorkLabel('Thinking');
       break;
 
+    case 'waiting':
+      // Hit the account's session limit — the server has already scheduled
+      // an automatic resend for when it resets, nothing to do here but
+      // reflect that in the live indicator (and the list row, via the
+      // roster_entry that accompanies this).
+      if (msg.agentId === currentAgentId) startWorkIndicator(workStartTs ?? Date.now(), null, msg.resumesAt);
+      break;
+
+    case 'turn_started':
+      // The scheduled auto-retry just fired and resent the message — same
+      // visual as a fresh send, just with no new user_message bubble to add.
+      if (msg.agentId === currentAgentId) startWorkIndicator(Date.now(), null);
+      break;
+
     case 'assistant_message':
       if (msg.agentId === currentAgentId) {
         stopWorkIndicator();
@@ -603,12 +1049,152 @@ let liveRawText = '';
 let workStartTs = null;
 let workTimerId = null;
 
+// ---- Send/stop button: the composer's submit button becomes a stop
+// button exactly when there'd be nothing else useful to submit anyway
+// (the open agent is working, and you haven't typed a reply to queue up).
+let composerMode = 'send';
+
+function updateSendButtonMode() {
+  const shouldStop = workStartTs !== null && inputEl.value.trim() === '';
+  composerMode = shouldStop ? 'stop' : 'send';
+  sendBtn.textContent = shouldStop ? '■' : '↑';
+  sendBtn.classList.toggle('stop-mode', shouldStop);
+  sendBtn.setAttribute('aria-label', shouldStop ? 'Stop' : 'Send');
+}
+
+function hideSlashSuggestions() {
+  slashSuggestionsEl.hidden = true;
+  slashSuggestionsEl.innerHTML = '';
+}
+
+// The list itself comes straight from the CLI's own session-init event
+// (see claudeBridge.js) via the current agent's roster entry — never
+// hardcoded here, so it can't go stale as Claude Code's own commands change.
+// Hand-maintained, deliberately — there's no reliable automatic source for
+// descriptions (unlike the command names themselves, which come straight
+// from the CLI's own session-init event). Unknown commands just show their
+// bare name with no description instead of a guess; ask to add one here
+// when a new/unfamiliar command shows up in the list.
+const SLASH_COMMAND_DESCRIPTIONS = {
+  clear: 'Clear conversation history and start fresh',
+  compact: 'Compact the conversation to free up context space',
+  model: 'Switch the AI model for this session',
+  config: 'View or change Claude Code settings',
+  context: 'Show context window usage breakdown',
+  mcp: 'Manage MCP server connections',
+  agents: 'Manage background agents',
+  doctor: 'Check the health of your Claude Code installation',
+  init: 'Generate a CLAUDE.md file documenting this codebase',
+  review: 'Review a GitHub pull request',
+  'security-review': 'Security review of the pending changes on this branch',
+  ultrareview: 'Cloud-hosted multi-agent code review of the current branch',
+  'code-review': 'Review the working diff for quality issues',
+  dataviz: 'Guidance for building charts, graphs, and dashboards',
+  'update-config': 'Configure the Claude Code harness via settings.json',
+  simplify: 'Review changed code for simplification and cleanup',
+  'fewer-permission-prompts': 'Add an allowlist to reduce permission prompts',
+  loop: 'Run a prompt or command on a recurring interval',
+  schedule: 'Create or manage scheduled cloud agents',
+  'claude-api': 'Reference for the Claude API / Anthropic SDK',
+  run: "Launch and drive this project's app to test a change",
+  fast: 'Toggle fast mode (faster output via Opus)',
+  usage: 'Show usage and credit summary',
+  rename: 'Rename this session',
+  // Looked up from official docs.claude.com / code.claude.com docs, since
+  // the CLI itself doesn't report descriptions (see the comment above).
+  'design-sync': "Sync your repo's design system with Claude Design (two-way)",
+  verify: 'Verify the app still works correctly (companion to /run)',
+  debug: 'Enable debug logging for this session and troubleshoot issues',
+  batch: 'Orchestrate large-scale changes across the codebase in parallel via subagents',
+  color: 'Set the prompt bar color for this session',
+  effort: "Set the model's reasoning effort level (low/medium/high/xhigh/max)",
+  heapdump: 'Write a JS heap snapshot to ~/Desktop for diagnosing memory usage',
+  insights: 'Generate a report analyzing your Claude Code session patterns',
+  goal: 'Set a goal — Claude keeps working across turns until it is met',
+  'usage-credits': 'View/manage usage credits to keep working past your plan limit',
+  'extra-usage': 'View/manage usage credits to keep working past your plan limit',
+  recap: 'Summarize session context when returning to it',
+  'team-onboarding': 'Generate a teammate ramp-up guide from your local usage patterns',
+  'run-skill-generator': 'Record how this app installs/runs and save it as a reusable skill',
+  'reload-skills': 'Reload the skills directory without restarting Claude Code',
+  design: 'Create, edit, and sync Claude Design projects from the terminal',
+  // Inferred from the design-sync/design/design-login pattern, not directly
+  // sourced — least confident two entries here, flag if wrong.
+  'design-consent': 'Grant Claude Design access authorization',
+  'design-revoke': 'Revoke Claude Design access authorization',
+};
+
+function updateSlashSuggestions() {
+  // Only while composing the command name itself (no space yet) — once
+  // there's a space the user's typing arguments, not searching for a command.
+  const match = inputEl.value.match(/^\/(\S*)$/);
+  const available = roster.get(currentAgentId)?.slashCommands || [];
+  if (!match || !available.length) {
+    hideSlashSuggestions();
+    return;
+  }
+
+  const prefix = match[1].toLowerCase();
+  const matches = available.filter((c) => c.toLowerCase().startsWith(prefix)); // scrollable now, no need to truncate
+  if (!matches.length) {
+    hideSlashSuggestions();
+    return;
+  }
+
+  slashSuggestionsEl.innerHTML = '';
+  for (const cmd of matches) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'slash-suggestion';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'slash-suggestion-name';
+    nameEl.textContent = '/' + cmd;
+    btn.appendChild(nameEl);
+
+    const description = SLASH_COMMAND_DESCRIPTIONS[cmd];
+    if (description) {
+      const descEl = document.createElement('span');
+      descEl.className = 'slash-suggestion-desc';
+      descEl.textContent = description;
+      btn.appendChild(descEl);
+    }
+
+    btn.addEventListener('click', () => {
+      inputEl.value = '/' + cmd + ' ';
+      autoResizeInput();
+      updateSendButtonMode();
+      hideSlashSuggestions();
+      inputEl.focus();
+    });
+    slashSuggestionsEl.appendChild(btn);
+  }
+  slashSuggestionsEl.hidden = false;
+}
+
 // ---- Working indicator: mirrors the CLI's "spinner + elapsed time" cue —
 // otherwise there is no signal at all that a turn is in flight until either
 // streamed text or the final message shows up, which can be many seconds
 // (tool calls, thinking) of apparent silence. Only ever shown for the
 // currently open agent; background agents show a working-dot in the list.
-function startWorkIndicator(startedAt, toolName) {
+function formatResumeTime(ms) {
+  return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+// Account-wide (not per-agent) — same two bars regardless of which chat is
+// open, since the underlying limits are shared across every agent here.
+function renderUsage(usage) {
+  usageSessionFill.style.width = (usage?.session?.percent ?? 0) + '%';
+  usageSessionBar.title = usage?.session
+    ? `Session: ${usage.session.percent}% used · resets ${usage.session.resetsLabel}`
+    : '';
+  usageWeekFill.style.width = (usage?.week?.percent ?? 0) + '%';
+  usageWeekBar.title = usage?.week
+    ? `Week: ${usage.week.percent}% used · resets ${usage.week.resetsLabel}`
+    : '';
+}
+
+function startWorkIndicator(startedAt, toolName, waitingUntil) {
   if (!liveBubble) {
     liveBubble = document.createElement('div');
     liveBubble.className = 'msg assistant live';
@@ -625,10 +1211,25 @@ function startWorkIndicator(startedAt, toolName) {
     liveRawText = '';
   }
   workStartTs = startedAt;
-  setWorkLabel(toolName ? `Running ${toolName}` : 'Thinking');
-  updateWorkTimer();
-  if (!workTimerId) workTimerId = setInterval(updateWorkTimer, 1000);
+  liveBubble.classList.toggle('waiting', !!waitingUntil);
+  if (waitingUntil) {
+    // Ticking seconds is useful for "how long has this been thinking";
+    // it's meaningless for "will resume in a few hours" — show a plain
+    // target time instead and stop the per-second timer.
+    setWorkLabel(`Rate limited — resumes ${formatResumeTime(waitingUntil)}`);
+    if (workTimerId) {
+      clearInterval(workTimerId);
+      workTimerId = null;
+    }
+    const timeEl = liveBubble.querySelector('.work-time');
+    if (timeEl) timeEl.textContent = '';
+  } else {
+    setWorkLabel(toolName ? `Running ${toolName}` : 'Thinking');
+    updateWorkTimer();
+    if (!workTimerId) workTimerId = setInterval(updateWorkTimer, 1000);
+  }
   scrollToBottom();
+  updateSendButtonMode();
 }
 
 function setWorkLabel(label) {
@@ -647,7 +1248,9 @@ function appendLiveDelta(text) {
   if (!liveBubble) startWorkIndicator(Date.now(), null); // defensive: delta with no preceding user_message/hello
   liveRawText += text;
   setWorkLabel('Writing');
-  liveBubble.querySelector('.live-text').innerHTML = renderMarkdown(extractOptions(liveRawText).cleanText);
+  const liveTextEl = liveBubble.querySelector('.live-text');
+  liveTextEl.innerHTML = renderMarkdown(extractOptions(liveRawText).cleanText);
+  addCodeCopyButtons(liveTextEl);
   scrollToBottom();
 }
 
@@ -662,6 +1265,7 @@ function stopWorkIndicator() {
     liveBubble = null;
   }
   liveRawText = '';
+  updateSendButtonMode();
 }
 
 // Same as stopWorkIndicator, but for paths where there's no DOM to remove
@@ -752,6 +1356,40 @@ function buildCopyButton(rawText) {
   return btn;
 }
 
+// Small copy button pinned to the corner of each code block, separate from
+// the whole-message copy button — for grabbing just one snippet out of a
+// reply that mixes prose and code, without the surrounding text.
+function addCodeCopyButtons(container) {
+  for (const pre of container.querySelectorAll('pre')) {
+    if (pre.querySelector('.code-copy-btn')) continue; // already has one
+    const code = pre.querySelector('code');
+    if (!code) continue;
+
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'code-copy-btn';
+    btn.setAttribute('aria-label', 'Copy code');
+    btn.innerHTML = COPY_ICON;
+
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      try {
+        await navigator.clipboard.writeText(code.textContent);
+        btn.innerHTML = CHECK_ICON;
+        btn.classList.add('copied');
+      } catch {
+        btn.innerHTML = COPY_ICON;
+      }
+      setTimeout(() => {
+        btn.innerHTML = COPY_ICON;
+        btn.classList.remove('copied');
+      }, 1500);
+    });
+
+    pre.appendChild(btn);
+  }
+}
+
 function renderMessage(m) {
   const el = document.createElement('div');
   el.className = `msg ${m.role}`;
@@ -762,6 +1400,7 @@ function renderMessage(m) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble' + (m.isError ? ' error' : '');
   bubble.innerHTML = renderMarkdown(cleanText);
+  addCodeCopyButtons(bubble);
   el.appendChild(bubble);
 
   if (options.length) el.appendChild(buildOptionButtons(options));
@@ -807,20 +1446,43 @@ function sendMessage(text) {
 
 formEl.addEventListener('submit', (e) => {
   e.preventDefault();
+  if (composerMode === 'stop') {
+    if (currentAgentId && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'stop', agentId: currentAgentId }));
+    }
+    return;
+  }
   sendMessage(inputEl.value);
   inputEl.value = '';
-  inputEl.style.height = 'auto';
+  autoResizeInput();
+  saveDraft(currentAgentId, ''); // sent — no longer a draft
+  updateSendButtonMode();
+  hideSlashSuggestions();
 });
 
+let draftSaveTimer = null;
 inputEl.addEventListener('input', () => {
-  inputEl.style.height = 'auto';
-  inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  autoResizeInput();
+  updateSendButtonMode();
+  updateSlashSuggestions();
+  // Debounced so every keystroke doesn't hit localStorage, but short enough
+  // that backgrounding the app moments after typing still catches it —
+  // the visibilitychange/pagehide flushes below are the hard guarantee.
+  clearTimeout(draftSaveTimer);
+  draftSaveTimer = setTimeout(() => saveDraft(currentAgentId, inputEl.value), 300);
 });
 
 // ---- Visibility -> badge + read receipts ----
 function setupVisibility(token) {
+  // Hard guarantee for the draft, independent of the debounce above — these
+  // fire right as the app backgrounds/suspends, which on iOS is often the
+  // last guaranteed chance to run any code before the process gets killed.
+  const flushDraft = () => currentAgentId && saveDraft(currentAgentId, inputEl.value);
+  window.addEventListener('pagehide', flushDraft);
+
   document.addEventListener('visibilitychange', () => {
     const visible = !document.hidden;
+    if (!visible) flushDraft();
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'visibility', visible }));
     }

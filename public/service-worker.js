@@ -78,7 +78,12 @@ self.addEventListener('notificationclick', (event) => {
           return client.focus();
         }
       }
-      if (self.clients.openWindow) return self.clients.openWindow('/');
+      // No running tab to postMessage into (app was fully closed, common on
+      // iOS) — fall back to a URL param so the fresh page load can deep-link
+      // once it boots, instead of silently landing on the plain agent list.
+      if (self.clients.openWindow) {
+        return self.clients.openWindow(agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/');
+      }
     })()
   );
 });
