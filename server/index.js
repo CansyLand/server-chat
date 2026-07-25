@@ -186,8 +186,15 @@ function broadcastRosterEntry(agentId) {
 // calls) short of a human telling it out of band. Full API details live in
 // the shared memory system instead of here, since every agent in this app
 // shares the same home directory and therefore the same auto-loaded memory.
+const AGENTS_DOC_FILE = path.join(process.cwd(), 'AGENTS.md');
+const TOKEN_FILE_PATH = path.join(process.cwd(), 'data', 'device-token.secret');
+
 function buildFullSystemPrompt(agent) {
-  const selfContext = `[xqlytskg-chat context: you are agent "${agent.name}" (id: ${agent.id}) inside this chat app. It gives you a per-agent task list via a REST API — see your memory for the endpoints, auth, and workflow.]`;
+  // Lives in the repo (AGENTS.md), not personal memory — so it ships with
+  // every install automatically instead of needing to be hand-copied into
+  // each account's own memory system. Port/token path are computed per
+  // install, never hardcoded, so nothing here needs editing on a new deploy.
+  const selfContext = `[xqlytskg-chat context: you are agent "${agent.name}" (id: ${agent.id}) inside this chat app. Base URL: http://127.0.0.1:${PORT} — auth token is the contents of ${TOKEN_FILE_PATH}. This app's own extra features (task list, etc.) are documented in ${AGENTS_DOC_FILE} — read it when you need the details.]`;
   return agent.systemPrompt ? `${selfContext}\n\n${agent.systemPrompt}` : selfContext;
 }
 
