@@ -140,7 +140,7 @@ export const store = {
   getAgent(id) {
     return agentsState.agents.find((a) => a.id === id) || null;
   },
-  createAgent({ name, emoji, color, workdir, systemPrompt, model }) {
+  createAgent({ name, emoji, color, workdir, systemPrompt, model, provider }) {
     const agent = {
       id: randomUUID().slice(0, 8),
       name,
@@ -149,6 +149,7 @@ export const store = {
       workdir,
       systemPrompt: systemPrompt || null,
       model: model || null,
+      provider: provider || null,
       sessionId: null,
       createdAt: Date.now(),
     };

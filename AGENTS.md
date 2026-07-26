@@ -55,7 +55,7 @@ needed.
 
 ---
 
-_When new app-specific features get added in the future, their usage docs
-should be appended here — this file is the one place any agent running
-behind this app should look, regardless of which install or account it's
-running under._
+## Skill specs
+
+App-specific skill descriptions live in `SKILLS.md` at the repo root.
+Read it when the user invokes a skill by name (e.g. "use caveman mode").

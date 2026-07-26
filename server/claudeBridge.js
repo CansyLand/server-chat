@@ -10,12 +10,13 @@ const WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 // with --resume so the conversation (Claude's own on-disk session history)
 // picks back up rather than starting over.
 export class ClaudeBridge extends EventEmitter {
-  constructor({ sessionId, workdir, systemPrompt, model } = {}) {
+  constructor({ sessionId, workdir, systemPrompt, model, extraEnv } = {}) {
     super();
     this.sessionId = sessionId || null;
     this.workdir = workdir || WORKDIR;
     this.systemPrompt = systemPrompt || null;
     this.model = model || null;
+    this.extraEnv = extraEnv || null;
     this.child = null;
     this.buf = '';
     this.shuttingDown = false;
@@ -48,6 +49,7 @@ export class ClaudeBridge extends EventEmitter {
     this.child = spawn(CLAUDE_BIN, args, {
       cwd: this.workdir,
       stdio: ['pipe', 'pipe', 'pipe'],
+      env: this.extraEnv ? { ...process.env, ...this.extraEnv } : process.env,
     });
 
     this.buf = '';

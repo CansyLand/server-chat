@@ -15,6 +15,26 @@ const PUBLIC_DIR = path.join(process.cwd(), 'public');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'data', 'pairing-code.secret');
 const DEFAULT_WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 const VALID_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+const VALID_PROVIDERS = ['anthropic', 'openrouter'];
+
+// Free-tier/alt-model routing: OpenRouter exposes an Anthropic-Messages-API
+// -compatible endpoint, so the same `claude --model <id>` mechanism works —
+// it just needs three extra env vars on that one agent's child process.
+// Key lives in data/ (gitignored), never in agents.json or the repo.
+const OPENROUTER_KEY_FILE = path.join(process.cwd(), 'data', 'openrouter-key.secret');
+function openRouterEnv() {
+  let key;
+  try {
+    key = fs.readFileSync(OPENROUTER_KEY_FILE, 'utf8').trim();
+  } catch {
+    return null;
+  }
+  if (!key) return null;
+  return { ANTHROPIC_BASE_URL: 'https://openrouter.ai/api', ANTHROPIC_AUTH_TOKEN: key, ANTHROPIC_API_KEY: '' };
+}
+function bridgeConfigKey(agent) {
+  return `${agent.provider || 'anthropic'}::${agent.model || ''}`;
+}
 
 // "You've hit your session limit · resets 2:30am (UTC)" — matched leniently
 // (only the digits + am/pm + UTC actually matter for scheduling the retry)
@@ -164,6 +184,7 @@ function rosterEntry(agent) {
     workdir: agent.workdir,
     systemPrompt: agent.systemPrompt,
     model: agent.model || 'sonnet',
+    provider: agent.provider || 'anthropic',
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
     lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
@@ -204,7 +225,9 @@ function startAgentBridge(agent) {
     workdir: agent.workdir,
     systemPrompt: buildFullSystemPrompt(agent),
     model: agent.model,
+    extraEnv: agent.provider === 'openrouter' ? openRouterEnv() : null,
   });
+  bridge.configKey = bridgeConfigKey(agent);
   const runtime = {
     bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null,
     interrupted: false, waitingUntil: null, lastUserText: null, retryTimeoutId: null, slashCommands: [],
@@ -522,7 +545,7 @@ app.delete('/api/agents/:id/todos/:todoId', requireAuth, (req, res) => {
 });
 
 app.post('/api/agents', requireAuth, (req, res) => {
-  const { name, emoji, color, workdir, systemPrompt, model } = req.body || {};
+  const { name, emoji, color, workdir, systemPrompt, model, provider } = req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'name required' });
   }
@@ -539,7 +562,15 @@ app.post('/api/agents', requireAuth, (req, res) => {
   if (!stat.isDirectory()) {
     return res.status(400).json({ error: 'working directory is not a directory' });
   }
-  if (model !== undefined && !VALID_MODELS.includes(model)) {
+  if (provider !== undefined && !VALID_PROVIDERS.includes(provider)) {
+    return res.status(400).json({ error: `provider must be one of: ${VALID_PROVIDERS.join(', ')}` });
+  }
+  const isOpenRouter = provider === 'openrouter';
+  if (isOpenRouter) {
+    if (typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({ error: 'model (OpenRouter model id) is required when provider is openrouter' });
+    }
+  } else if (model !== undefined && !VALID_MODELS.includes(model)) {
     return res.status(400).json({ error: `model must be one of: ${VALID_MODELS.join(', ')}` });
   }
 
@@ -549,7 +580,8 @@ app.post('/api/agents', requireAuth, (req, res) => {
     color: typeof color === 'string' && color ? color : '#7c9cff',
     workdir: dir,
     systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, 4000) : null,
-    model: VALID_MODELS.includes(model) ? model : null,
+    model: isOpenRouter ? model.trim().slice(0, 200) : (VALID_MODELS.includes(model) ? model : null),
+    provider: isOpenRouter ? 'openrouter' : null,
   });
   startAgentBridge(agent);
   broadcast({ type: 'roster_entry', agent: rosterEntry(agent) });
@@ -588,16 +620,29 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
       bridgeParamsChanged = true;
     }
   }
-  // Model is intentionally NOT restarted here, unlike workdir/systemPrompt —
-  // picking a new model shouldn't kill whatever that agent's process is
-  // doing right now. It's just persisted; the WS message handler restarts
-  // the bridge with the new model right before the *next* message is sent,
-  // when there's nothing in flight to disturb.
-  if (typeof body.model === 'string' && body.model !== (agent.model || 'sonnet')) {
-    if (!VALID_MODELS.includes(body.model)) {
-      return res.status(400).json({ error: `model must be one of: ${VALID_MODELS.join(', ')}` });
+  // Model/provider are intentionally NOT restarted here, unlike workdir/
+  // systemPrompt — picking a new model shouldn't kill whatever that agent's
+  // process is doing right now. It's just persisted; the WS message handler
+  // restarts the bridge with the new config right before the *next* message
+  // is sent, when there's nothing in flight to disturb.
+  if (body.provider !== undefined || body.model !== undefined) {
+    const nextProvider = body.provider !== undefined ? body.provider : (agent.provider || 'anthropic');
+    if (!VALID_PROVIDERS.includes(nextProvider)) {
+      return res.status(400).json({ error: `provider must be one of: ${VALID_PROVIDERS.join(', ')}` });
     }
-    patch.model = body.model;
+    const nextModel = body.model !== undefined ? body.model : agent.model;
+    if (nextProvider === 'openrouter') {
+      if (typeof nextModel !== 'string' || !nextModel.trim()) {
+        return res.status(400).json({ error: 'model (OpenRouter model id) is required when provider is openrouter' });
+      }
+      patch.model = nextModel.trim().slice(0, 200);
+    } else {
+      if (nextModel != null && !VALID_MODELS.includes(nextModel)) {
+        return res.status(400).json({ error: `model must be one of: ${VALID_MODELS.join(', ')}` });
+      }
+      patch.model = VALID_MODELS.includes(nextModel) ? nextModel : null;
+    }
+    patch.provider = nextProvider === 'anthropic' ? null : nextProvider;
   }
 
   const updated = store.updateAgent(agent.id, patch);
@@ -692,7 +737,7 @@ wss.on('connection', (ws, req) => {
         // before this message, rather than the moment it was picked (which
         // could have been mid-turn on the old model).
         const agent = store.getAgent(msg.agentId);
-        if (agent && runtime.bridge.model !== (agent.model || null)) {
+        if (agent && runtime.bridge.configKey !== bridgeConfigKey(agent)) {
           stopAgentBridge(msg.agentId);
           runtime = startAgentBridge(agent);
           broadcastRosterEntry(msg.agentId);

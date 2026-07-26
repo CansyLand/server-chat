@@ -33,6 +33,11 @@ const newAgentCancelBtn = $('#new-agent-cancel');
 const agentDeleteBtn = $('#agent-delete-btn');
 const emojiPickerEl = $('#emoji-picker');
 const newAgentModelSelect = $('#new-agent-model');
+const openrouterModal = $('#openrouter-modal');
+const openrouterForm = $('#openrouter-form');
+const openrouterModelInput = $('#openrouter-model-input');
+const openrouterError = $('#openrouter-error');
+const openrouterCancelBtn = $('#openrouter-cancel');
 const formEl = $('#composer');
 const inputEl = $('#input');
 const sendBtn = $('#send-btn');
@@ -366,7 +371,7 @@ async function openAgent(agentId) {
   currentAgentId = agentId;
   chatAgentEmojiEl.textContent = entry?.emoji || '🤖';
   chatAgentNameEl.textContent = entry?.name || '';
-  modelSelect.value = entry?.model || 'sonnet';
+  syncModelSelect(entry);
   listViewEl.hidden = true;
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
@@ -458,12 +463,23 @@ function openAgentForm(agentId) {
   selectedEmoji = entry?.emoji || AGENT_EMOJIS[0];
   buildEmojiPicker();
   setColorSelection(entry?.color || '#7c9cff');
-  newAgentModelSelect.value = entry?.model || 'sonnet';
+  // This form's dropdown only knows the 4 built-in models — an agent
+  // switched to a custom OpenRouter id (set via the header quick-switch)
+  // has no matching <option> here, so we leave the select at its default
+  // and track whether the user actually touches it, rather than trying to
+  // preselect a value that doesn't exist and silently corrupting it on save.
+  editFormModelTouched = false;
+  newAgentModelSelect.value = (entry && entry.provider !== 'openrouter') ? entry.model : 'sonnet';
 
   newAgentModal.hidden = false;
 }
 
+let editFormModelTouched = false;
+
 function setupNewAgent(token) {
+  newAgentModelSelect.addEventListener('change', () => {
+    editFormModelTouched = true;
+  });
   newAgentBtn.addEventListener('click', () => openAgentForm(null));
   agentOptionsBtn.addEventListener('click', () => {
     if (currentAgentId) openAgentForm(currentAgentId);
@@ -487,18 +503,25 @@ function setupNewAgent(token) {
     const editingId = agentFormIdInput.value || null;
     newAgentSubmitBtn.disabled = true;
     newAgentSubmitBtn.textContent = editingId ? 'Saving…' : 'Creating…';
+    const payload = {
+      name: newAgentNameInput.value,
+      emoji: selectedEmoji,
+      color: selectedColor,
+      workdir: newAgentWorkdirInput.value,
+      systemPrompt: newAgentPersonaInput.value,
+    };
+    // Only touch model/provider on an edit if the user actually changed the
+    // dropdown — this form doesn't know about custom OpenRouter ids set via
+    // the header quick-switch, so leaving it alone preserves those untouched.
+    if (!editingId || editFormModelTouched) {
+      payload.model = newAgentModelSelect.value;
+      payload.provider = 'anthropic';
+    }
     try {
       const res = await fetch(editingId ? `/api/agents/${encodeURIComponent(editingId)}` : '/api/agents', {
         method: editingId ? 'PATCH' : 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          name: newAgentNameInput.value,
-          emoji: selectedEmoji,
-          color: selectedColor,
-          workdir: newAgentWorkdirInput.value,
-          systemPrompt: newAgentPersonaInput.value,
-          model: newAgentModelSelect.value,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (!res.ok) {
@@ -557,6 +580,30 @@ function setupNewAgent(token) {
   });
 }
 
+// An OpenRouter model id (e.g. "deepseek/deepseek-chat-v3-0324:free") won't
+// match any of the select's static <option> values, so a plain `.value =`
+// assignment silently falls back to the first option instead of showing
+// what's actually active. This keeps one dynamic <option> in sync with
+// whatever custom id the agent is currently on, so selection always sticks.
+function syncModelSelect(entry) {
+  const provider = entry?.provider || 'anthropic';
+  const model = entry?.model || 'sonnet';
+  let customOpt = modelSelect.querySelector('option[data-custom]');
+  if (provider === 'openrouter') {
+    if (!customOpt) {
+      customOpt = document.createElement('option');
+      customOpt.dataset.custom = '1';
+      modelSelect.appendChild(customOpt);
+    }
+    customOpt.value = model;
+    customOpt.textContent = `OpenRouter: ${model}`;
+    modelSelect.value = model;
+  } else {
+    if (customOpt) customOpt.remove();
+    modelSelect.value = model;
+  }
+}
+
 // ---- Quick model switch (chat header) — separate from the full edit form
 // since this is meant for fast, frequent switching mid-conversation based
 // on how demanding the next task is, not a one-time setup choice.
@@ -564,28 +611,88 @@ function setupNewAgent(token) {
 // just records the choice and applies it (restarting that agent's bridge,
 // same session) right before the *next* message is sent, so it never
 // interrupts whatever's currently in flight.
+// Picking an OpenRouter model needs a real text input, not window.prompt() —
+// iOS silently no-ops synchronous dialogs (alert/confirm/prompt) inside a
+// home-screen-installed PWA, so prompt() here looked like tapping the option
+// did nothing at all and just reverted the select.
+let openrouterPendingAgentId = null;
+let openrouterPendingPreviousEntry = null;
+
+function closeOpenrouterModal(revert) {
+  openrouterModal.hidden = true;
+  openrouterError.hidden = true;
+  if (revert) syncModelSelect(openrouterPendingPreviousEntry);
+  openrouterPendingAgentId = null;
+  openrouterPendingPreviousEntry = null;
+}
+
 function setupModelPicker(token) {
-  modelSelect.addEventListener('change', async () => {
+  modelSelect.addEventListener('change', () => {
     const agentId = currentAgentId;
     if (!agentId) return;
+    const previousEntry = roster.get(agentId);
+
+    if (modelSelect.value === '__openrouter__') {
+      openrouterPendingAgentId = agentId;
+      openrouterPendingPreviousEntry = previousEntry;
+      openrouterModelInput.value = previousEntry?.provider === 'openrouter' ? previousEntry.model : '';
+      openrouterError.hidden = true;
+      openrouterModal.hidden = false;
+      openrouterModelInput.focus();
+      return;
+    }
+
     const model = modelSelect.value;
-    const previousModel = roster.get(agentId)?.model || 'sonnet';
+    (async () => {
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ model, provider: 'anthropic' }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          syncModelSelect(previousEntry);
+          setStatus(data.error || 'Could not switch model', false);
+          return;
+        }
+        roster.set(data.agent.id, data.agent);
+        syncModelSelect(data.agent);
+      } catch {
+        syncModelSelect(previousEntry);
+        setStatus('offline — try again', false);
+      }
+    })();
+  });
+
+  openrouterCancelBtn.addEventListener('click', () => closeOpenrouterModal(true));
+  openrouterModal.addEventListener('click', (e) => {
+    if (e.target === openrouterModal) closeOpenrouterModal(true);
+  });
+
+  openrouterForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const agentId = openrouterPendingAgentId;
+    const model = openrouterModelInput.value.trim();
+    if (!agentId || !model) return;
     try {
       const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ model }),
+        body: JSON.stringify({ model, provider: 'openrouter' }),
       });
       const data = await res.json();
       if (!res.ok) {
-        modelSelect.value = previousModel;
-        setStatus(data.error || 'Could not switch model', false);
+        openrouterError.textContent = data.error || 'Could not switch model';
+        openrouterError.hidden = false;
         return;
       }
       roster.set(data.agent.id, data.agent);
+      syncModelSelect(data.agent);
+      closeOpenrouterModal(false);
     } catch {
-      modelSelect.value = previousModel;
-      setStatus('offline — try again', false);
+      openrouterError.textContent = 'offline — try again';
+      openrouterError.hidden = false;
     }
   });
 }
@@ -968,7 +1075,7 @@ function handleServerEvent(msg) {
     case 'roster_entry':
       roster.set(msg.agent.id, msg.agent);
       if (!listViewEl.hidden) renderAgentList();
-      if (currentAgentId === msg.agent.id) modelSelect.value = msg.agent.model || 'sonnet';
+      if (currentAgentId === msg.agent.id) syncModelSelect(msg.agent);
       setBadgeLocal(totalUnreadFromRoster());
       break;
 

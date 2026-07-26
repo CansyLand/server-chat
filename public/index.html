@@ -64,6 +64,7 @@
         <option value="sonnet">Sonnet 5</option>
         <option value="opus">Opus 5</option>
         <option value="fable">Fable 5</option>
+        <option value="__openrouter__">OpenRouter…</option>
       </select>
       <button id="agent-options-btn" type="button" aria-label="Agent options">⋯</button>
     </header>
@@ -135,6 +136,20 @@
       <button type="submit">Add</button>
     </form>
     <button type="button" id="todo-close-btn">Close</button>
+  </div>
+</div>
+
+<div id="openrouter-modal" class="modal-overlay" hidden>
+  <div class="settings-sheet">
+    <h2 class="sheet-title">OpenRouter model</h2>
+    <form id="openrouter-form">
+      <label class="field-label" for="openrouter-model-input">Model id</label>
+      <input id="openrouter-model-input" type="text" placeholder="e.g. deepseek/deepseek-chat-v3-0324:free" autocomplete="off" required />
+      <p class="field-optional">See openrouter.ai/models for available ids.</p>
+      <p id="openrouter-error" class="error-text" hidden></p>
+      <button type="submit" id="openrouter-submit">Switch</button>
+      <button type="button" id="openrouter-cancel">Cancel</button>
+    </form>
   </div>
 </div>
 
