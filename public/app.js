@@ -1116,11 +1116,17 @@ function handleServerEvent(msg) {
         // Full detail (name + input) is still shown, collapsed, once the
         // finished assistant_message arrives — this is just the live label.
         startWorkIndicator(workStartTs ?? Date.now(), msg.name);
+        // Also show live tool invocation in the chat
+        createLiveTool(msg.id, msg.name, msg.input);
       }
       break;
 
     case 'tool_result':
-      if (msg.agentId === currentAgentId) setWorkLabel('Thinking');
+      if (msg.agentId === currentAgentId) {
+        setWorkLabel('Thinking');
+        // Update the live tool with its result
+        updateLiveTool(msg.toolUseId, msg.isError, msg.preview);
+      }
       break;
 
     case 'waiting':
@@ -1140,6 +1146,8 @@ function handleServerEvent(msg) {
     case 'assistant_message':
       if (msg.agentId === currentAgentId) {
         stopWorkIndicator();
+        // Clean up live tool elements — they'll be replaced by the final message
+        clearLiveTools();
         if (!document.getElementById('m-' + msg.message.id)) renderMessage(msg.message);
         scrollToBottom();
       }
@@ -1155,6 +1163,68 @@ function handleServerEvent(msg) {
 let liveRawText = '';
 let workStartTs = null;
 let workTimerId = null;
+
+// Live tool tracking: toolUseId -> DOM element
+const liveTools = new Map();
+
+// ---- Live tool display: shows tool invocations and results as they happen
+function createLiveTool(toolUseId, name, input) {
+  const el = document.createElement('div');
+  el.className = 'msg assistant live-tool';
+  el.id = 'tool-' + toolUseId;
+  el.dataset.toolUseId = toolUseId;
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble tool-bubble';
+
+  const header = document.createElement('div');
+  header.className = 'tool-header';
+  const nameEl = document.createElement('span');
+  nameEl.className = 'tool-name';
+  nameEl.textContent = name;
+  const statusEl = document.createElement('span');
+  statusEl.className = 'tool-status running';
+  statusEl.textContent = 'Running…';
+  header.append(nameEl, statusEl);
+
+  const inputEl = document.createElement('pre');
+  inputEl.className = 'tool-input';
+  inputEl.textContent = JSON.stringify(input, null, 2);
+
+  const resultEl = document.createElement('pre');
+  resultEl.className = 'tool-result hidden';
+  resultEl.textContent = 'Waiting for result…';
+
+  bubble.append(header, inputEl, resultEl);
+  el.appendChild(bubble);
+  messagesEl.appendChild(el);
+  liveTools.set(toolUseId, el);
+  scrollToBottom();
+}
+
+function updateLiveTool(toolUseId, isError, preview) {
+  const el = liveTools.get(toolUseId);
+  if (!el) return;
+  const statusEl = el.querySelector('.tool-status');
+  const resultEl = el.querySelector('.tool-result');
+  if (statusEl) {
+    statusEl.textContent = isError ? 'Error' : 'Done';
+    statusEl.className = 'tool-status ' + (isError ? 'error' : 'done');
+  }
+  if (resultEl) {
+    resultEl.textContent = typeof preview === 'string' ? preview : JSON.stringify(preview, null, 2);
+    resultEl.classList.remove('hidden');
+    if (isError) resultEl.classList.add('error');
+  }
+  scrollToBottom();
+}
+
+function clearLiveTools() {
+  for (const el of liveTools.values()) {
+    el.remove();
+  }
+  liveTools.clear();
+}
 
 // ---- Send/stop button: the composer's submit button becomes a stop
 // button exactly when there'd be nothing else useful to submit anyway
@@ -1385,6 +1455,7 @@ function resetWorkIndicatorState() {
   workStartTs = null;
   liveBubble = null;
   liveRawText = '';
+  clearLiveTools();
 }
 
 // ---- Rendering ----

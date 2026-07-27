@@ -680,6 +680,83 @@ header .title { font-weight: 600; }
   50% { opacity: 1; transform: scale(1.15); }
 }
 
+/* ---- Live tool display: shows tool invocations and results as they happen ---- */
+.msg.live-tool {
+  max-width: 92%;
+  opacity: 0.9;
+}
+.tool-bubble {
+  background: rgba(124, 156, 255, 0.08);
+  border: 1px solid rgba(124, 156, 255, 0.2);
+  border-radius: 12px;
+  padding: 8px 12px;
+}
+.tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+}
+.tool-name {
+  font-weight: 600;
+  color: var(--accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85rem;
+}
+.tool-status {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.tool-status.running {
+  background: rgba(124, 156, 255, 0.2);
+  color: var(--accent);
+  animation: work-pulse 1.2s ease-in-out infinite;
+}
+.tool-status.done {
+  background: rgba(111, 208, 140, 0.2);
+  color: #6fd08c;
+}
+.tool-status.error {
+  background: rgba(255, 107, 107, 0.2);
+  color: var(--error);
+}
+.tool-input {
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  max-height: 200px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 6px;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.tool-result {
+  margin: 6px 0 0;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  max-height: 300px;
+  overflow: auto;
+  background: rgba(0, 0, 0, 0.15);
+  border-radius: 6px;
+  padding: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 3px solid var(--accent);
+}
+.tool-result.hidden {
+  display: none;
+}
+.tool-result.error {
+  border-left-color: var(--error);
+  background: rgba(255, 107, 107, 0.1);
+}
+
 /* ---- Markdown content rendered inside a bubble ---- */
 .bubble > *:first-child { margin-top: 0; }
 .bubble > *:last-child { margin-bottom: 0; }
