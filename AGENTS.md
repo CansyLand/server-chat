@@ -55,7 +55,18 @@ needed.
 
 ---
 
-## Skill specs
+## CodeGraph MCP
 
-App-specific skill descriptions live in `SKILLS.md` at the repo root.
-Read it when the user invokes a skill by name (e.g. "use caveman mode").
+A local codebase graph server (tree-sitter + SQLite) exposed via MCP.
+Config lives in `.mcp.json` at repo root — agents on any install pick it up automatically.
+
+**Tools:**
+- `codegraph_search(query, limit?)` — find symbols by name/signature
+- `codegraph_file(file)` — all symbols in a file
+- `codegraph_callers(symbolId)` — who calls this symbol
+- `codegraph_callees(symbolId)` — what this symbol calls
+- `codegraph_reindex()` — full re-index
+
+**Workflow:** When exploring an unfamiliar codebase, start with `codegraph_search` to locate a symbol, then `codegraph_callers`/`codegraph_callees` to trace call chains, and `codegraph_file` to see a file's full structure. Replaces dozens of grep/read calls with single graph lookups.
+
+**Limitations:** Edge resolution (calls/imports) is best-effort — cross-file calls may be missed. Verify critical paths with direct `Read` tool.

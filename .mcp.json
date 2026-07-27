@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "codegraph": {
+      "command": "node",
+      "args": ["/home/cansy/codegraph-mcp/dist/index.js"],
+      "env": {
+        "CODEGRAPH_ROOT": "/home/cansy/xqlytskg-chat"
+      }
+    }
+  }
+}
