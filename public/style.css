@@ -743,6 +743,42 @@ header .title { font-weight: 600; }
   font-variant-numeric: tabular-nums;
 }
 
+/* ---- Live thinking: shown while a turn is in flight, inside the same live
+   bubble as the work-status line, so it disappears naturally once the turn
+   finishes (the persisted, collapsed version below takes over at that
+   point). Kept visually quieter than the reply text itself — this is
+   reasoning-in-progress, not the answer. ---- */
+.live-thinking {
+  margin-top: 6px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+.live-thinking-summary {
+  cursor: pointer;
+  user-select: none;
+  font-style: italic;
+}
+.live-thinking-text {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  padding: 4px 0 0 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  opacity: 0.8;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+/* The persisted, collapsed record of a finished turn's thinking — same shape
+   as .tools (the tool-call log) since both are "detail the reply itself
+   doesn't need but might be worth checking". */
+.thinking-details summary { font-style: italic; }
+.thinking-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 /* ---- Live tool display: shows tool invocations and results as they happen ---- */
 .msg.live-tool {
   max-width: 92%;

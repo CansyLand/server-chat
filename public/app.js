@@ -413,8 +413,24 @@ async function openAgent(agentId) {
     messagePagination.oldestLoadedId = data.messages?.[0]?.id || null;
     scrollToBottom();
     compactingSince = data.compacting?.startedAt ?? null;
-    if (data.working) startWorkIndicator(data.working.startedAt, data.working.tool, data.working.waitingUntil);
-    else if (compactingSince) startWorkIndicator(compactingSince, null);
+    if (data.working) {
+      // Opening (or reopening, after a reconnect) a chat mid-turn: replay
+      // everything that already happened — tool calls made so far, thinking
+      // accumulated so far, reply text streamed so far — instead of just a
+      // bare "Thinking…" with no history, which is all a fresh work-status
+      // broadcast could show on its own.
+      startWorkIndicator(data.working.startedAt, data.working.tool, data.working.waitingUntil);
+      for (const t of data.working.tools || []) {
+        createLiveTool(t.id, t.name, t.input);
+        if (t.result !== null) updateLiveTool(t.id, t.isError, t.result);
+      }
+      liveThinkingText = data.working.thinkingText || '';
+      liveThinkingTokens = data.working.thinkingTokens || 0;
+      renderLiveThinking();
+      if (data.working.deltaText) appendLiveDelta(data.working.deltaText);
+    } else if (compactingSince) {
+      startWorkIndicator(compactingSince, null);
+    }
   } catch {
     /* WS will surface connectivity issues via the list-view status line */
   }
@@ -453,6 +469,8 @@ async function loadMoreMessages() {
       el.appendChild(bubble);
       if (options.length) el.appendChild(buildOptionButtons(options));
       el.appendChild(buildCopyButton(cleanText));
+      const thinkingDetails = buildThinkingDetails(m.thinking, m.thinkingTokens);
+      if (thinkingDetails) el.appendChild(thinkingDetails);
       if (m.tools && m.tools.length) {
         const details = document.createElement('details');
         details.className = 'tools';
@@ -1192,6 +1210,27 @@ function handleServerEvent(msg) {
       if (msg.agentId === currentAgentId) appendLiveDelta(msg.text);
       break;
 
+    case 'thinking_start':
+      if (msg.agentId === currentAgentId) {
+        if (!liveBubble) startWorkIndicator(Date.now(), null);
+        liveThinkingText = '';
+        liveThinkingTokens = 0;
+        setWorkLabel('Thinking');
+        renderLiveThinking();
+      }
+      break;
+
+    case 'thinking_delta':
+      if (msg.agentId === currentAgentId) {
+        if (!liveBubble) startWorkIndicator(Date.now(), null);
+        if (msg.text) liveThinkingText += msg.text;
+        liveThinkingTokens = msg.tokens || liveThinkingTokens;
+        setWorkLabel('Thinking');
+        renderLiveThinking();
+        scrollToBottom();
+      }
+      break;
+
     case 'tool_use':
       if (msg.agentId === currentAgentId) {
         // Full detail (name + input) is still shown, collapsed, once the
@@ -1258,6 +1297,8 @@ function handleServerEvent(msg) {
 }
 
 let liveRawText = '';
+let liveThinkingText = '';
+let liveThinkingTokens = 0;
 let workStartTs = null;
 let workTimerId = null;
 // Set while a /compact is in flight so the work indicator shows a specific
@@ -1488,10 +1529,16 @@ function startWorkIndicator(startedAt, toolName, waitingUntil) {
           <span class="work-label"></span>
           <span class="work-time"></span>
         </div>
+        <details class="live-thinking" hidden>
+          <summary class="live-thinking-summary"></summary>
+          <div class="live-thinking-text"></div>
+        </details>
         <div class="live-text"></div>
       </div>`;
     messagesEl.appendChild(liveBubble);
     liveRawText = '';
+    liveThinkingText = '';
+    liveThinkingTokens = 0;
   }
   workStartTs = startedAt;
   liveBubble.classList.toggle('waiting', !!waitingUntil);
@@ -1542,6 +1589,37 @@ function appendLiveDelta(text) {
   scrollToBottom();
 }
 
+// Renders thinking as it streams in, so opening the app mid-turn shows what
+// was already reasoned through rather than just a bare "Thinking" label with
+// no history. Anthropic-native models redact the actual text server-side —
+// only a running token estimate ever arrives for those — so this always
+// shows *something* live (text when available, a token count otherwise)
+// rather than going silent depending on which model happens to be active.
+function renderLiveThinking() {
+  if (!liveBubble) return;
+  const details = liveBubble.querySelector('.live-thinking');
+  const summary = liveBubble.querySelector('.live-thinking-summary');
+  const textEl = liveBubble.querySelector('.live-thinking-text');
+  if (!details || !summary || !textEl) return;
+
+  const hasText = liveThinkingText.length > 0;
+  const hasTokens = liveThinkingTokens > 0;
+  if (!hasText && !hasTokens) {
+    details.hidden = true;
+    return;
+  }
+  details.hidden = false;
+  // Token estimates and streamed text come from mutually exclusive sources
+  // (see thinking_delta in claudeBridge.js): Anthropic-native models redact
+  // the text and only ever report tokens; OpenRouter models stream real text
+  // and never report a token estimate. Prefer whichever signal actually
+  // showed up rather than assuming both are always present together.
+  summary.textContent = hasTokens
+    ? `Thinking… (~${formatCompactTokens(liveThinkingTokens)} tokens)`
+    : `Thinking… (${liveThinkingText.length} chars)`;
+  if (hasText) textEl.textContent = liveThinkingText;
+}
+
 function stopWorkIndicator() {
   if (workTimerId) {
     clearInterval(workTimerId);
@@ -1553,6 +1631,8 @@ function stopWorkIndicator() {
     liveBubble = null;
   }
   liveRawText = '';
+  liveThinkingText = '';
+  liveThinkingTokens = 0;
   compactingSince = null;
   updateSendButtonMode();
 }
@@ -1567,6 +1647,8 @@ function resetWorkIndicatorState() {
   workStartTs = null;
   liveBubble = null;
   liveRawText = '';
+  liveThinkingText = '';
+  liveThinkingTokens = 0;
   compactingSince = null;
   clearLiveTools();
 }
@@ -1681,6 +1763,30 @@ function addCodeCopyButtons(container) {
   }
 }
 
+// Collapsed record of a finished turn's thinking, styled like the existing
+// collapsed tools block and placed just before it (thinking precedes tool
+// calls chronologically). '' text with a token count still renders — that's
+// the normal, non-broken case for Anthropic-native models, which redact the
+// actual text server-side; showing nothing there would look identical to a
+// turn that didn't think at all.
+function buildThinkingDetails(text, tokens) {
+  if (!text && !tokens) return null;
+  const details = document.createElement('details');
+  details.className = 'tools thinking-details';
+  const summary = document.createElement('summary');
+  summary.textContent = text
+    ? `Thinking${tokens ? ` (${formatCompactTokens(tokens)} tokens)` : ''}`
+    : `Thinking (~${formatCompactTokens(tokens)} tokens, not shown by this model)`;
+  details.appendChild(summary);
+  if (text) {
+    const pre = document.createElement('div');
+    pre.className = 'tool-line thinking-text';
+    pre.textContent = text;
+    details.appendChild(pre);
+  }
+  return details;
+}
+
 function renderMessage(m) {
   const el = document.createElement('div');
   el.className = `msg ${m.role}`;
@@ -1697,6 +1803,9 @@ function renderMessage(m) {
   if (options.length) el.appendChild(buildOptionButtons(options));
 
   el.appendChild(buildCopyButton(cleanText));
+
+  const thinkingDetails = buildThinkingDetails(m.thinking, m.thinkingTokens);
+  if (thinkingDetails) el.appendChild(thinkingDetails);
 
   if (m.tools && m.tools.length) {
     const details = document.createElement('details');

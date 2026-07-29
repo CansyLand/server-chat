@@ -219,9 +219,28 @@ function rosterEntry(agent) {
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
     lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
-    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
+    working: runtime?.turnStartedAt ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
     sleeping: !runtime,
+  };
+}
+
+// Everything a client needs to reconstruct the in-flight turn from scratch —
+// not just "something is happening" but what, so far. Used by both the
+// roster (list-view working-dot / reconnect) and the messages endpoint
+// (opening/reopening a chat mid-turn): the tool calls made so far, the
+// thinking accumulated so far, and the streamed reply text so far, none of
+// which otherwise exist anywhere but the live broadcast events a client
+// would have had to already be listening for.
+function liveTurnState(runtime) {
+  return {
+    startedAt: runtime.turnStartedAt,
+    tool: runtime.activeToolName,
+    waitingUntil: runtime.waitingUntil || null,
+    tools: runtime.currentTurn?.tools || [],
+    thinkingText: runtime.liveThinkingText || '',
+    thinkingTokens: runtime.liveThinkingTokens || 0,
+    deltaText: runtime.liveDeltaBuffer || '',
   };
 }
 
@@ -266,6 +285,16 @@ function startAgentBridge(agent) {
     usageProbe: 0, // counter: number of pending probe commands (usage, context, etc.)
     compacting: null, // { startedAt, tokensBefore } while a /compact is in flight
     compactedAt: null, // carries the finished compaction until the after-probe lands
+    // Thinking, accumulated live and persisted with the turn's final message
+    // so it survives a reconnect the same way tool calls do (see the
+    // liveThinkingText/liveThinkingTokens fields below, mirrored into the
+    // roster/messages endpoints for replay). Anthropic-native models redact
+    // the actual text server-side before it reaches the CLI — only a
+    // cumulative token estimate comes through in that case — so
+    // liveThinkingText stays '' and liveThinkingTokens is the only signal.
+    // OpenRouter models are not redacted and stream real text into both.
+    liveThinkingText: '',
+    liveThinkingTokens: 0,
   };
   runtimes.set(agent.id, runtime);
 
@@ -278,6 +307,25 @@ function startAgentBridge(agent) {
   bridge.on('delta', (text) => {
     runtime.liveDeltaBuffer += text;
     broadcast({ type: 'delta', agentId: agent.id, text });
+  });
+
+  bridge.on('thinking_start', () => {
+    runtime.liveThinkingText = '';
+    runtime.liveThinkingTokens = 0;
+    broadcast({ type: 'thinking_start', agentId: agent.id });
+  });
+
+  bridge.on('thinking_delta', ({ text, estimatedTokens }) => {
+    if (text) runtime.liveThinkingText += text;
+    if (estimatedTokens) runtime.liveThinkingTokens += estimatedTokens;
+    broadcast({ type: 'thinking_delta', agentId: agent.id, text, tokens: runtime.liveThinkingTokens });
+  });
+
+  bridge.on('thinking_final', ({ text }) => {
+    // The CLI's own final block is authoritative over whatever was
+    // accumulated from deltas — covers cases where a delta was missed, and
+    // is a no-op when the two already agree.
+    runtime.liveThinkingText = text;
   });
 
   bridge.on('tool_use', ({ id, name, input }) => {
@@ -372,6 +420,8 @@ function startAgentBridge(agent) {
       if (resetAt) {
         runtime.currentTurn = null;
         runtime.liveDeltaBuffer = '';
+        runtime.liveThinkingText = '';
+        runtime.liveThinkingTokens = 0;
         runtime.activeToolName = null;
         runtime.waitingUntil = resetAt.getTime();
         // turnStartedAt deliberately stays set — this agent is still
@@ -394,6 +444,13 @@ function startAgentBridge(agent) {
       ts: Date.now(),
       isError: wasInterrupted ? false : isError,
       tools: runtime.currentTurn?.tools || [],
+      // Persisted alongside tools so it's collapsible the same way once the
+      // turn is done, and so it survives a reconnect/history-load instead of
+      // only existing during the live stream. '' (not null) on Anthropic-
+      // native models, where the text itself is redacted server-side — the
+      // token count is kept regardless, since that part is never redacted.
+      thinking: runtime.liveThinkingText || '',
+      thinkingTokens: runtime.liveThinkingTokens || null,
     };
     store.addMessage(agent.id, message);
     broadcast({ type: 'assistant_message', agentId: agent.id, message });
@@ -409,6 +466,8 @@ function startAgentBridge(agent) {
 
     runtime.currentTurn = null;
     runtime.liveDeltaBuffer = '';
+    runtime.liveThinkingText = '';
+    runtime.liveThinkingTokens = 0;
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
     broadcastRosterEntry(agent.id);
@@ -441,6 +500,8 @@ function startAgentBridge(agent) {
     // it sits on every client's screen counting up forever.
     runtime.currentTurn = null;
     runtime.liveDeltaBuffer = '';
+    runtime.liveThinkingText = '';
+    runtime.liveThinkingTokens = 0;
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
     // A compaction that died with the process will never reach turn_done, so
@@ -615,7 +676,7 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
     messages,
     hasMore,
     totalCount: allMessages.length,
-    working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
+    working: runtime?.turnStartedAt ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
   });
 });

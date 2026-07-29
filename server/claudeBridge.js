@@ -135,6 +135,16 @@ export class ClaudeBridge extends EventEmitter {
         const ev = obj.event;
         if (ev?.type === 'content_block_delta' && ev.delta?.type === 'text_delta') {
           this.emit('delta', ev.delta.text);
+        } else if (ev?.type === 'content_block_start' && ev.content_block?.type === 'thinking') {
+          this.emit('thinking_start');
+        } else if (ev?.type === 'content_block_delta' && ev.delta?.type === 'thinking_delta') {
+          // On Anthropic-native models, extended thinking is redacted before
+          // it ever reaches the CLI: `thinking` here is always "" and only
+          // estimated_tokens is real. OpenRouter models (no server-side
+          // redaction) stream actual text through this same field. Both
+          // cases are forwarded as-is; the caller decides how to render an
+          // empty-text delta (token-count-only progress) versus a real one.
+          this.emit('thinking_delta', { text: ev.delta.thinking || '', estimatedTokens: ev.delta.estimated_tokens ?? null });
         }
         break;
       }
@@ -143,6 +153,11 @@ export class ClaudeBridge extends EventEmitter {
         for (const block of obj.message?.content || []) {
           if (block.type === 'tool_use') {
             this.emit('tool_use', { id: block.id, name: block.name, input: block.input });
+          } else if (block.type === 'thinking' && block.thinking) {
+            // Only emitted when the final block actually carries text (i.e.
+            // not redacted) — the redacted case already got its progress
+            // signal from the thinking_delta token counts above.
+            this.emit('thinking_final', { text: block.thinking });
           }
         }
         break;
