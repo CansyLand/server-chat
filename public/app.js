@@ -414,7 +414,9 @@ async function openAgent(agentId) {
     messagePagination.hasMore = data.hasMore;
     messagePagination.oldestLoadedId = data.messages?.[0]?.id || null;
     scrollToBottom();
+    compactingSince = data.compacting?.startedAt ?? null;
     if (data.working) startWorkIndicator(data.working.startedAt, data.working.tool, data.working.waitingUntil);
+    else if (compactingSince) startWorkIndicator(compactingSince, null);
   } catch {
     /* WS will surface connectivity issues via the list-view status line */
   }
@@ -1238,6 +1240,21 @@ function handleServerEvent(msg) {
       if (msg.agentId === currentAgentId) startWorkIndicator(workStartTs ?? Date.now(), null, msg.resumesAt);
       break;
 
+    case 'compacting':
+      if (msg.agentId === currentAgentId) {
+        compactingSince = msg.startedAt;
+        startWorkIndicator(msg.startedAt, null);
+      }
+      break;
+
+    case 'compact_done':
+      if (msg.agentId === currentAgentId) {
+        compactingSince = null;
+        liveBubble?.classList.remove('compacting');
+        if (!msg.crashed) renderCompactSummary(msg);
+      }
+      break;
+
     case 'turn_started':
       // The scheduled auto-retry just fired and resent the message — same
       // visual as a fresh send, just with no new user_message bubble to add.
@@ -1265,6 +1282,11 @@ function handleServerEvent(msg) {
 let liveRawText = '';
 let workStartTs = null;
 let workTimerId = null;
+// Set while a /compact is in flight so the work indicator shows a specific
+// compaction animation instead of a generic "Thinking". The CLI reports no
+// progress during compaction, so this drives an indeterminate animation and
+// an elapsed timer — never a fake percentage.
+let compactingSince = null;
 
 // Live tool tracking: toolUseId -> DOM element
 const liveTools = new Map();
@@ -1506,11 +1528,16 @@ function startWorkIndicator(startedAt, toolName, waitingUntil) {
     }
     const timeEl = liveBubble.querySelector('.work-time');
     if (timeEl) timeEl.textContent = '';
+  } else if (compactingSince) {
+    setWorkLabel('Compacting conversation');
+    updateWorkTimer();
+    if (!workTimerId) workTimerId = setInterval(updateWorkTimer, 1000);
   } else {
     setWorkLabel(toolName ? `Running ${toolName}` : 'Thinking');
     updateWorkTimer();
     if (!workTimerId) workTimerId = setInterval(updateWorkTimer, 1000);
   }
+  liveBubble.classList.toggle('compacting', !!compactingSince);
   scrollToBottom();
   updateSendButtonMode();
 }
@@ -1548,6 +1575,7 @@ function stopWorkIndicator() {
     liveBubble = null;
   }
   liveRawText = '';
+  compactingSince = null;
   updateSendButtonMode();
 }
 
@@ -1561,6 +1589,7 @@ function resetWorkIndicatorState() {
   workStartTs = null;
   liveBubble = null;
   liveRawText = '';
+  compactingSince = null;
   clearLiveTools();
 }
 
@@ -1721,6 +1750,60 @@ function renderMessage(m) {
   }
 
   messagesEl.appendChild(el);
+}
+
+// The end-of-compaction marker. Compaction is otherwise completely silent —
+// no progress events, no reply text — so without this the only cue that it
+// finished is the indicator vanishing. Figures shown are measured, never
+// estimated: elapsed time, and the before/after context reading from the
+// probe that runs right after the turn. A missing "after" reading (probe
+// failed to parse) degrades to just the duration rather than a wrong number.
+function formatCompactTokens(n) {
+  if (!Number.isFinite(n)) return null;
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
+}
+
+function renderCompactSummary(msg) {
+  const el = document.createElement('div');
+  el.className = 'msg compact-summary';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  const secs = Math.max(0, Math.round((msg.durationMs || 0) / 1000));
+  const took = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m ${secs % 60}s`;
+
+  const before = formatCompactTokens(msg.tokensBefore);
+  const after = formatCompactTokens(msg.tokensAfter);
+
+  let headline;
+  if (msg.isError) headline = '\u26a0\ufe0f Compaction failed';
+  else if (msg.wasInterrupted) headline = '\u26a0\ufe0f Compaction stopped';
+  else headline = '\u2713 Conversation compacted';
+
+  const title = document.createElement('div');
+  title.className = 'compact-title';
+  title.textContent = headline;
+  bubble.appendChild(title);
+
+  const detail = document.createElement('div');
+  detail.className = 'compact-detail';
+  if (!msg.isError && !msg.wasInterrupted && before && after) {
+    const freed = msg.tokensBefore - msg.tokensAfter;
+    const pct = msg.tokensBefore > 0 ? Math.round((freed / msg.tokensBefore) * 100) : 0;
+    detail.textContent = freed > 0
+      ? `${before} \u2192 ${after} tokens \u00b7 freed ${formatCompactTokens(freed)} (${pct}%) \u00b7 took ${took}`
+      : `${before} \u2192 ${after} tokens \u00b7 took ${took}`;
+  } else if (!msg.isError && !msg.wasInterrupted && after) {
+    detail.textContent = `now at ${after} tokens\u00a0\u00b7 took ${took}`;
+  } else {
+    detail.textContent = `took ${took}`;
+  }
+  bubble.appendChild(detail);
+
+  el.appendChild(bubble);
+  messagesEl.appendChild(el);
+  scrollToBottom();
 }
 
 function scrollToBottom() {

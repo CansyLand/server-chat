@@ -220,6 +220,7 @@ function rosterEntry(agent) {
     unreadCount: store.getUnreadCount(agent.id),
     lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
     working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
+    compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
     sleeping: !runtime,
   };
 }
@@ -263,6 +264,8 @@ function startAgentBridge(agent) {
     bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null,
     interrupted: false, waitingUntil: null, lastUserText: null, retryTimeoutId: null, slashCommands: [],
     usageProbe: 0, // counter: number of pending probe commands (usage, context, etc.)
+    compacting: null, // { startedAt, tokensBefore } while a /compact is in flight
+    compactedAt: null, // carries the finished compaction until the after-probe lands
   };
   runtimes.set(agent.id, runtime);
 
@@ -326,6 +329,25 @@ function startAgentBridge(agent) {
         if (runtime._probeContext) latestUsage.context = runtime._probeContext;
         broadcast({ type: 'usage_update', usage: latestUsage });
       }
+
+      // This probe was the one kicked off right after a /compact finished, so
+      // its context reading is the "after" figure — pair it with the "before"
+      // captured at send time to report a real, measured token delta.
+      const done = runtime.compactedAt;
+      if (done) {
+        runtime.compactedAt = null;
+        broadcast({
+          type: 'compact_done',
+          agentId: agent.id,
+          tokensBefore: done.tokensBefore,
+          tokensAfter: runtime._probeContext?.tokensUsed ?? null,
+          percentAfter: runtime._probeContext?.percent ?? null,
+          durationMs: done.durationMs,
+          wasInterrupted: done.wasInterrupted,
+          isError: done.isError,
+        });
+      }
+
       delete runtime._probeUsage;
       delete runtime._probeContext;
       broadcastRosterEntry(agent.id); // clears the brief working-indicator state
@@ -376,12 +398,30 @@ function startAgentBridge(agent) {
     store.addMessage(agent.id, message);
     broadcast({ type: 'assistant_message', agentId: agent.id, message });
 
+    // A finished /compact gets an explicit end-of-compaction marker rather
+    // than leaving the user to infer it from the indicator disappearing.
+    // The CLI reports no progress while compacting, so the only honest
+    // figures are elapsed time and the before/after context reading — the
+    // latter arrives via the refreshUsage() probe below, so the token delta
+    // is filled in later by the usage_update rather than guessed at here.
+    const compacting = runtime.compacting;
+    runtime.compacting = null;
+
     runtime.currentTurn = null;
     runtime.liveDeltaBuffer = '';
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
     broadcastRosterEntry(agent.id);
-    refreshUsage(); // a real turn just spent tokens — the numbers may have moved
+
+    if (compacting) {
+      runtime.compactedAt = {
+        tokensBefore: compacting.tokensBefore,
+        durationMs: Date.now() - compacting.startedAt,
+        wasInterrupted,
+        isError: !wasInterrupted && isError,
+      };
+    }
+    refreshUsage(agent.id); // a real turn just spent tokens — the numbers may have moved
 
     if (!wasInterrupted && !anyClientViewing(agent.id)) {
       store.incrementUnread(agent.id);
@@ -403,6 +443,11 @@ function startAgentBridge(agent) {
     runtime.liveDeltaBuffer = '';
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
+    // A compaction that died with the process will never reach turn_done, so
+    // clear the flag here or the client's indicator runs forever.
+    runtime.compacting = null;
+    runtime.compactedAt = null;
+    broadcast({ type: 'compact_done', agentId: agent.id, crashed: true });
     broadcast({ type: 'system', agentId: agent.id, text: `${agent.name}: process restarting…` });
     broadcastRosterEntry(agent.id);
   });
@@ -571,6 +616,7 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
     hasMore,
     totalCount: allMessages.length,
     working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
+    compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
   });
 });
 
@@ -836,6 +882,14 @@ wss.on('connection', (ws, req) => {
         runtime.lastUserText = msg.text;
         runtime.turnStartedAt = Date.now();
         runtime.activeToolName = null;
+        // /compact is slow, silent, and emits no progress of its own, so flag
+        // it here to give the client something specific to show instead of a
+        // generic "Thinking". The context reading taken now is the "before"
+        // half of the token delta reported when it finishes.
+        if (/^\/compact\b/i.test(msg.text.trim())) {
+          runtime.compacting = { startedAt: Date.now(), tokensBefore: latestUsage?.context?.tokensUsed ?? null };
+          broadcast({ type: 'compacting', agentId: msg.agentId, startedAt: runtime.compacting.startedAt });
+        }
         broadcastRosterEntry(msg.agentId);
       } catch (err) {
         broadcast({ type: 'system', agentId: msg.agentId, text: `error: ${err.message}` });

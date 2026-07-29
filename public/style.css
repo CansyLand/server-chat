@@ -710,6 +710,67 @@ header .title { font-weight: 600; }
   50% { opacity: 1; transform: scale(1.15); }
 }
 
+/* ---- Compaction: /compact is slow and emits no progress, so the indicator
+   uses an indeterminate scanning bar (deliberately NOT a percentage — there
+   is no real progress figure to show) plus the shared elapsed timer. ---- */
+.msg.live.compacting .work-dot {
+  background: var(--context-blue);
+  animation: compact-pulse 0.9s ease-in-out infinite;
+}
+.msg.live.compacting .work-label { color: var(--context-blue); }
+.msg.live.compacting .bubble {
+  position: relative;
+  overflow: hidden;
+}
+.msg.live.compacting .bubble::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: 40%;
+  background: linear-gradient(90deg, transparent, var(--context-blue), transparent);
+  animation: compact-scan 1.4s ease-in-out infinite;
+}
+@keyframes compact-pulse {
+  0%, 100% { opacity: 0.3; transform: scale(0.7); }
+  50% { opacity: 1; transform: scale(1.25); }
+}
+@keyframes compact-scan {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(350%); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .msg.live.compacting .work-dot,
+  .msg.live.compacting .bubble::after { animation: none; }
+}
+
+/* The end-of-compaction marker — a centered system note, visually distinct
+   from both sides of the conversation since it is neither. */
+.msg.compact-summary {
+  align-self: center;
+  max-width: 90%;
+  margin: 4px 0;
+}
+.msg.compact-summary .bubble {
+  background: transparent;
+  border: 1px dashed rgba(77, 163, 255, 0.4);
+  border-radius: 10px;
+  padding: 7px 12px;
+  text-align: center;
+}
+.compact-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--context-blue);
+}
+.compact-detail {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- Live tool display: shows tool invocations and results as they happen ---- */
 .msg.live-tool {
   max-width: 92%;
