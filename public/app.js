@@ -12,6 +12,9 @@ const usageSessionBar = $('#usage-session-bar');
 const usageSessionFill = $('#usage-session-fill');
 const usageWeekBar = $('#usage-week-bar');
 const usageWeekFill = $('#usage-week-fill');
+const usageContextBar = $('#usage-context-bar');
+const usageContextFill = $('#usage-context-fill');
+const usageRefreshBtn = $('#usage-refresh-btn');
 const todoBtn = $('#todo-btn');
 const todoBadge = $('#todo-badge');
 const todoModal = $('#todo-modal');
@@ -232,6 +235,7 @@ async function boot(token) {
   setupNewAgent(token);
   setupModelPicker(token);
   setupTodos(token);
+  setupUsage(token);
   setupNav();
 }
 
@@ -365,6 +369,13 @@ function showListView() {
   renderAgentList();
 }
 
+// ---- Message pagination state ----
+let messagePagination = {
+  hasMore: false,
+  loading: false,
+  oldestLoadedId: null,
+};
+
 async function openAgent(agentId) {
   if (currentAgentId && currentAgentId !== agentId) saveDraft(currentAgentId, inputEl.value);
   const entry = roster.get(agentId);
@@ -376,11 +387,12 @@ async function openAgent(agentId) {
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
   resetWorkIndicatorState();
+  messagePagination = { hasMore: false, loading: false, oldestLoadedId: null };
   inputEl.value = getDraft(agentId);
   autoResizeInput();
   updateSendButtonMode();
   hideSlashSuggestions();
-  todoModal.hidden = true; // defensive — shouldn't be reachable while open, but don't leave it stuck
+  todoModal.hidden = true;
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'view', agentId }));
@@ -394,11 +406,13 @@ async function openAgent(agentId) {
   });
 
   try {
-    const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/messages`, {
+    const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}/messages?limit=5`, {
       headers: { Authorization: `Bearer ${currentToken}` },
     });
     const data = await res.json();
     for (const m of data.messages || []) renderMessage(m);
+    messagePagination.hasMore = data.hasMore;
+    messagePagination.oldestLoadedId = data.messages?.[0]?.id || null;
     scrollToBottom();
     if (data.working) startWorkIndicator(data.working.startedAt, data.working.tool, data.working.waitingUntil);
   } catch {
@@ -410,6 +424,72 @@ async function openAgent(agentId) {
     setBadgeLocal(totalUnreadFromRoster());
   }
 }
+
+// Load older messages when scrolling up
+async function loadMoreMessages() {
+  if (!currentAgentId || messagePagination.loading || !messagePagination.hasMore || !messagePagination.oldestLoadedId) return;
+  messagePagination.loading = true;
+
+  try {
+    const res = await fetch(`/api/agents/${encodeURIComponent(currentAgentId)}/messages?limit=10&before=${encodeURIComponent(messagePagination.oldestLoadedId)}`, {
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+    const data = await res.json();
+    const olderMessages = data.messages || [];
+
+    // Prepend older messages while preserving scroll position
+    const firstChild = messagesEl.firstChild;
+    const scrollHeightBefore = messagesEl.scrollHeight;
+    const fragment = document.createDocumentFragment();
+    for (const m of olderMessages) {
+      const el = document.createElement('div');
+      el.id = 'm-' + m.id;
+      el.className = `msg ${m.role}`;
+      const { cleanText, options } = extractOptions(m.text);
+      const bubble = document.createElement('div');
+      bubble.className = 'bubble' + (m.isError ? ' error' : '');
+      bubble.innerHTML = renderMarkdown(cleanText);
+      addCodeCopyButtons(bubble);
+      el.appendChild(bubble);
+      if (options.length) el.appendChild(buildOptionButtons(options));
+      el.appendChild(buildCopyButton(cleanText));
+      if (m.tools && m.tools.length) {
+        const details = document.createElement('details');
+        details.className = 'tools';
+        const summary = document.createElement('summary');
+        summary.textContent = `${m.tools.length} action${m.tools.length > 1 ? 's' : ''}`;
+        details.appendChild(summary);
+        for (const t of m.tools) {
+          const line = document.createElement('div');
+          line.className = 'tool-line' + (t.isError ? ' error' : '');
+          const inputPreview = t.input ? JSON.stringify(t.input).slice(0, 200) : '';
+          line.textContent = `${t.name} ${inputPreview}`;
+          details.appendChild(line);
+        }
+        el.appendChild(details);
+      }
+      fragment.appendChild(el);
+    }
+    messagesEl.insertBefore(fragment, firstChild);
+    // Adjust scrollTop to keep the same visual position after prepending
+    messagesEl.scrollTop += messagesEl.scrollHeight - scrollHeightBefore;
+
+    messagePagination.hasMore = data.hasMore;
+    messagePagination.oldestLoadedId = olderMessages[0]?.id || null;
+  } catch (err) {
+    console.error('Failed to load more messages:', err);
+  } finally {
+    messagePagination.loading = false;
+  }
+}
+
+// Scroll listener for loading more messages
+messagesEl.addEventListener('scroll', () => {
+  // Load more when scrolled near top (within 200px)
+  if (messagesEl.scrollTop < 200) {
+    loadMoreMessages();
+  }
+});
 
 function setupNav() {
   backBtn.addEventListener('click', showListView);
@@ -879,6 +959,26 @@ function setupTodos(token) {
   });
 }
 
+// ---- Usage refresh ----
+function setupUsage(token) {
+  const usageBtn = document.getElementById('usage-refresh-btn');
+  if (!usageBtn) return;
+  usageBtn.addEventListener('click', () => {
+    // Visual feedback: spin the button
+    usageBtn.textContent = '⟳';
+    usageBtn.style.transition = 'transform 0.5s linear';
+    usageBtn.style.transform = 'rotate(360deg)';
+    setTimeout(() => {
+      usageBtn.textContent = '↻';
+      usageBtn.style.transform = '';
+    }, 800);
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'refresh_usage' }));
+    }
+  });
+}
+
 // ---- Settings ----
 function setupSettings(token) {
   settingsBtn.addEventListener('click', async () => {
@@ -1083,6 +1183,7 @@ function handleServerEvent(msg) {
       renderUsage(msg.usage);
       break;
 
+
     case 'todos_update':
       if (msg.agentId === currentAgentId) {
         currentTodos = msg.todos;
@@ -1157,6 +1258,7 @@ function handleServerEvent(msg) {
       if (msg.agentId === currentAgentId) stopWorkIndicator();
       setStatus(msg.text, false);
       break;
+
   }
 }
 
@@ -1358,17 +1460,21 @@ function formatResumeTime(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-// Account-wide (not per-agent) — same two bars regardless of which chat is
+// Account-wide (not per-agent) -- same two bars regardless of which chat is
 // open, since the underlying limits are shared across every agent here.
 function renderUsage(usage) {
-  usageSessionFill.style.width = (usage?.session?.percent ?? 0) + '%';
+  usageSessionFill.style.width = (usage?.session?.percent ?? 0) + "%";
   usageSessionBar.title = usage?.session
     ? `Session: ${usage.session.percent}% used · resets ${usage.session.resetsLabel}`
-    : '';
-  usageWeekFill.style.width = (usage?.week?.percent ?? 0) + '%';
+    : "";
+  usageWeekFill.style.width = (usage?.week?.percent ?? 0) + "%";
   usageWeekBar.title = usage?.week
     ? `Week: ${usage.week.percent}% used · resets ${usage.week.resetsLabel}`
-    : '';
+    : "";
+  usageContextFill.style.width = (usage?.context?.percent ?? 0) + "%";
+  usageContextBar.title = usage?.context
+    ? `Context: ${usage.context.percent}% used · ${usage.context.tokensUsed}/${usage.context.tokensTotal} tokens`
+    : "";
 }
 
 function startWorkIndicator(startedAt, toolName, waitingUntil) {
@@ -1598,6 +1704,19 @@ function renderMessage(m) {
       line.textContent = `${t.name} ${inputPreview}`;
       details.appendChild(line);
     }
+    el.appendChild(details);
+  }
+
+  // Collapsible error details for failed messages
+  if (m.isError && cleanText) {
+    const details = document.createElement('details');
+    details.className = 'error-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Show error details';
+    details.appendChild(summary);
+    const pre = document.createElement('pre');
+    pre.textContent = cleanText;
+    details.appendChild(pre);
     el.appendChild(details);
   }
 

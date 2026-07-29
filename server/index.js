@@ -75,6 +75,37 @@ function parseUsageText(text) {
   };
 }
 
+// Parses the reply from a `/context` slash command. The CLI renders it as a
+// markdown report whose one line we care about is:
+//   "**Tokens:** 43.8k / 200k (22%)"
+// Numbers carry k/M suffixes and the percentage is only shown rounded, so the
+// token counts — not the printed percent — are the authoritative figure.
+const CONTEXT_TOKENS_RE = /\*{0,2}Tokens:?\*{0,2}\s*([\d.,]+)\s*([kKmM]?)\s*\/\s*([\d.,]+)\s*([kKmM]?)/;
+
+function parseTokenCount(value, suffix) {
+  const n = parseFloat(value.replace(/,/g, ''));
+  if (!Number.isFinite(n)) return null;
+  const scale = /^[kK]$/.test(suffix) ? 1e3 : /^[mM]$/.test(suffix) ? 1e6 : 1;
+  return Math.round(n * scale);
+}
+
+function parseContextText(text) {
+  if (typeof text !== 'string') return null;
+  const match = text.match(CONTEXT_TOKENS_RE);
+  if (!match) return null;
+
+  const tokensUsed = parseTokenCount(match[1], match[2]);
+  const tokensTotal = parseTokenCount(match[3], match[4]);
+  if (!tokensUsed || !tokensTotal) return null;
+
+  return {
+    percent: Math.min(100, Math.round((tokensUsed / tokensTotal) * 100)),
+    detail: `${match[1]}${match[2]} / ${match[3]}${match[4]} tokens`,
+    tokensUsed,
+    tokensTotal,
+  };
+}
+
 // Changes every daemon restart, which happens on every deploy — a cheap,
 // zero-maintenance build fingerprint for the settings panel.
 const BUILD_VERSION = new Date().toISOString();
@@ -231,7 +262,7 @@ function startAgentBridge(agent) {
   const runtime = {
     bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null,
     interrupted: false, waitingUntil: null, lastUserText: null, retryTimeoutId: null, slashCommands: [],
-    usageProbe: false,
+    usageProbe: 0, // counter: number of pending probe commands (usage, context, etc.)
   };
   runtimes.set(agent.id, runtime);
 
@@ -268,20 +299,35 @@ function startAgentBridge(agent) {
   });
 
   bridge.on('turn_done', async ({ text, isError }) => {
-    // An invisible background /usage probe (see refreshUsage below) — never
-    // shown as a real message, never counted as unread, doesn't touch the
-    // rate-limit/interrupt handling below at all.
-    if (runtime.usageProbe) {
-      runtime.usageProbe = false;
+    // Invisible background probes (/usage, /context, etc.) — never shown as
+    // real messages, never counted as unread, don't touch rate-limit handling.
+    if (runtime.usageProbe > 0) {
+      runtime.usageProbe -= 1;
+      // Each probe's reply is matched against both parsers rather than assumed
+      // from send order — the CLI doesn't guarantee replies come back in the
+      // order the commands went out, and a reply that matches neither (e.g.
+      // /usage on an OpenRouter model, which returns a cost summary) is simply
+      // ignored instead of clobbering a good reading.
+      const parsedUsage = parseUsageText(text);
+      const parsedContext = parseContextText(text);
+      if (parsedUsage) runtime._probeUsage = parsedUsage;
+      if (parsedContext) runtime._probeContext = parsedContext;
+      // Only process and broadcast when both probes have returned
+      if (runtime.usageProbe > 0) return;
       runtime.currentTurn = null;
       runtime.liveDeltaBuffer = '';
       runtime.turnStartedAt = null;
       runtime.activeToolName = null;
-      const parsed = parseUsageText(text);
-      if (parsed) {
-        latestUsage = { ...parsed, updatedAt: Date.now() };
+      if (runtime._probeUsage || runtime._probeContext) {
+        // Only overwrite a field this probe cycle actually resolved — a cycle
+        // where one command's reply didn't parse must leave the other's last
+        // known value alone rather than blanking it to undefined.
+        latestUsage = { ...latestUsage, ...runtime._probeUsage, updatedAt: Date.now() };
+        if (runtime._probeContext) latestUsage.context = runtime._probeContext;
         broadcast({ type: 'usage_update', usage: latestUsage });
       }
+      delete runtime._probeUsage;
+      delete runtime._probeContext;
       broadcastRosterEntry(agent.id); // clears the brief working-indicator state
       return;
     }
@@ -456,22 +502,32 @@ setInterval(() => {
 // ---- Account usage tracking: the CLI doesn't push this proactively, so we
 // ask via an invisible `/usage` probe whenever the numbers could plausibly
 // have changed (see the two call sites below) — account-wide, so it's
-// stored globally rather than per-agent. Only ever probes an agent nobody
-// is currently looking at, so it can never flicker a stray "Thinking…" into view.
-let latestUsage = null; // { session: {...}|null, week: {...}|null, updatedAt }
+// stored globally rather than per-agent. The probe is invisible (handled
+// specially in turn_done), so it won't flicker a stray "Thinking…" into view.
+let latestUsage = null; // { session: {...}|null, week: {...}|null, context: {...}|null, updatedAt }
 
-function refreshUsage() {
-  for (const [agentId, runtime] of runtimes) {
-    if (runtime.turnStartedAt) continue; // busy with something real
-    if (anyClientViewing(agentId)) continue; // would be visible — skip this round
-    runtime.usageProbe = true;
+// Context is per-session, not account-wide like session/week, so the probe
+// prefers the agent whose chat is actually open — otherwise the bar would
+// report some unrelated background agent's context. Only ever probes an idle
+// agent: setting usageProbe on a busy one makes turn_done swallow that real
+// turn's reply as a probe response, losing the user's answer entirely.
+function refreshUsage(viewedAgentId) {
+  const candidates = viewedAgentId && runtimes.has(viewedAgentId)
+    ? [viewedAgentId, ...runtimes.keys()]
+    : [...runtimes.keys()];
+
+  for (const agentId of candidates) {
+    const runtime = runtimes.get(agentId);
+    if (!runtime || runtime.turnStartedAt) continue; // busy with something real
+    runtime.usageProbe = 2;
     try {
       runtime.bridge.send('/usage');
+      runtime.bridge.send('/context');
       runtime.turnStartedAt = Date.now();
     } catch {
-      runtime.usageProbe = false;
+      runtime.usageProbe = 0;
     }
-    return; // usage is account-wide — one probe per cycle is enough
+    return; // one probe per cycle is enough
   }
 }
 
@@ -487,9 +543,33 @@ app.get('/api/roster', requireAuth, (req, res) => {
 app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
   const agent = store.getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: 'no such agent' });
+
+  // Pagination: limit (default 10, max 100), before (message id to load older than)
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit) || 10));
+  const before = req.query.before || null;
+
+  const allMessages = store.getMessages(agent.id);
+  let messages = allMessages;
+  let beforeIdx = -1;
+
+  if (before) {
+    beforeIdx = allMessages.findIndex(m => m.id === before);
+    if (beforeIdx >= 0) {
+      messages = allMessages.slice(0, beforeIdx);
+    }
+  }
+
+  // Return newest first (slice from end)
+  messages = messages.slice(-limit);
+
   const runtime = runtimes.get(agent.id);
+  const hasMore = before
+    ? messages.length === limit && beforeIdx > 0
+    : allMessages.length > limit;
   res.json({
-    messages: store.getMessages(agent.id),
+    messages,
+    hasMore,
+    totalCount: allMessages.length,
     working: runtime?.turnStartedAt ? { startedAt: runtime.turnStartedAt, tool: runtime.activeToolName, waitingUntil: runtime.waitingUntil || null } : null,
   });
 });
@@ -703,7 +783,7 @@ wss.on('connection', (ws, req) => {
   ws.openAgentId = null; // which agent's chat (if any) is the open screen
 
   ws.send(JSON.stringify({ type: 'hello', agents: buildRoster(), usage: latestUsage }));
-  refreshUsage(); // a fresh connection means the app was just (re)opened — worth a check
+  refreshUsage(ws.openAgentId); // a fresh connection means the app was just (re)opened — worth a check
 
   ws.on('message', (raw) => {
     let msg;
@@ -792,6 +872,8 @@ wss.on('connection', (ws, req) => {
     } else if (msg.type === 'read' && ws.openAgentId) {
       store.clearUnread(ws.openAgentId);
       broadcastRosterEntry(ws.openAgentId);
+    } else if (msg.type === 'refresh_usage') {
+      refreshUsage(ws.openAgentId);
     }
   });
 });

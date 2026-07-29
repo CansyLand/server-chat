@@ -8,6 +8,7 @@
   --text-dim: #8a8a92;
   --error: #ff6b6b;
   --accent: #7c9cff;
+  --context-blue: #4da3ff;
 }
 
 /* Theme profiles — purely cosmetic, one per device (localStorage), so
@@ -343,6 +344,34 @@ header .title { font-weight: 600; }
   background: var(--surface); /* fills the 1px gap between the two bars */
 }
 
+#usage-refresh-btn {
+  position: absolute;
+  top: 100%;
+  right: 52px;
+  margin-top: 8px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.1s;
+}
+#usage-refresh-btn:hover {
+  background: var(--accent);
+  color: #0b0b0d;
+}
+#usage-refresh-btn:active {
+  transform: scale(0.95);
+}
+
 #todo-btn {
   position: absolute;
   top: 100%;
@@ -389,6 +418,7 @@ header .title { font-weight: 600; }
 }
 #usage-session-fill { background: var(--accent); }
 #usage-week-fill { background: var(--error); }
+#usage-context-fill { background: var(--context-blue); opacity: 0.8; }
 
 #status {
   margin-left: auto;
@@ -970,4 +1000,31 @@ header .title { font-weight: 600; }
 }
 #send-btn.stop-mode {
   font-size: 0.85rem;
+}
+
+/* Collapsible error details for failed messages */
+.error-details {
+  margin-top: 8px;
+  border-top: 1px solid var(--error);
+  padding-top: 8px;
+}
+.error-details summary {
+  cursor: pointer;
+  font-size: 0.8rem;
+  color: var(--error);
+  user-select: none;
+}
+.error-details pre {
+  margin: 8px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.7rem;
+  line-height: 1.4;
+  background: rgba(255, 107, 107, 0.1);
+  border-radius: 6px;
+  padding: 8px;
+  max-height: 300px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  border-left: 3px solid var(--error);
 }
