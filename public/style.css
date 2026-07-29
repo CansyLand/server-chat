@@ -344,34 +344,6 @@ header .title { font-weight: 600; }
   background: var(--surface); /* fills the 1px gap between the two bars */
 }
 
-#usage-refresh-btn {
-  position: absolute;
-  top: 100%;
-  right: 52px;
-  margin-top: 8px;
-  z-index: 5;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  border: none;
-  background: var(--surface);
-  color: var(--text);
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
-  font-size: 1rem;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background 0.2s, transform 0.1s;
-}
-#usage-refresh-btn:hover {
-  background: var(--accent);
-  color: #0b0b0d;
-}
-#usage-refresh-btn:active {
-  transform: scale(0.95);
-}
-
 #todo-btn {
   position: absolute;
   top: 100%;

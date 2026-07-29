@@ -14,7 +14,6 @@ const usageWeekBar = $('#usage-week-bar');
 const usageWeekFill = $('#usage-week-fill');
 const usageContextBar = $('#usage-context-bar');
 const usageContextFill = $('#usage-context-fill');
-const usageRefreshBtn = $('#usage-refresh-btn');
 const todoBtn = $('#todo-btn');
 const todoBadge = $('#todo-badge');
 const todoModal = $('#todo-modal');
@@ -235,7 +234,6 @@ async function boot(token) {
   setupNewAgent(token);
   setupModelPicker(token);
   setupTodos(token);
-  setupUsage(token);
   setupNav();
 }
 
@@ -957,26 +955,6 @@ function setupTodos(token) {
       });
     } catch {
       /* ignore — see patchTodo */
-    }
-  });
-}
-
-// ---- Usage refresh ----
-function setupUsage(token) {
-  const usageBtn = document.getElementById('usage-refresh-btn');
-  if (!usageBtn) return;
-  usageBtn.addEventListener('click', () => {
-    // Visual feedback: spin the button
-    usageBtn.textContent = '⟳';
-    usageBtn.style.transition = 'transform 0.5s linear';
-    usageBtn.style.transform = 'rotate(360deg)';
-    setTimeout(() => {
-      usageBtn.textContent = '↻';
-      usageBtn.style.transform = '';
-    }, 800);
-
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'refresh_usage' }));
     }
   });
 }
