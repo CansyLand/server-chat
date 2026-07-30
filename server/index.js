@@ -222,6 +222,11 @@ function rosterEntry(agent) {
     working: isReallyWorking(runtime) ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
     sleeping: !runtime,
+    // This agent's own context reading, if one has ever been taken — so the
+    // client has the right number the instant this agent's chat is opened,
+    // rather than showing 0%/stale-other-agent data until the next probe
+    // cycle happens to land on this specific agent.
+    context: runtime?.latestContext || null,
   };
 }
 
@@ -303,6 +308,13 @@ function startAgentBridge(agent) {
     // OpenRouter models are not redacted and stream real text into both.
     liveThinkingText: '',
     liveThinkingTokens: 0,
+    // Context window fill is per-session, not account-wide like session/week
+    // (each agent is a separate --resume'd conversation against its own
+    // context window) — it must live here, per-runtime, not in the single
+    // global `latestUsage`. Storing it globally was the bug behind every
+    // agent's context bar showing whichever agent was last probed,
+    // regardless of which chat was actually open.
+    latestContext: null, // { percent, detail, tokensUsed, tokensTotal, updatedAt } | null
   };
   runtimes.set(agent.id, runtime);
 
@@ -391,13 +403,19 @@ function startAgentBridge(agent) {
       runtime.liveDeltaBuffer = '';
       runtime.turnStartedAt = null;
       runtime.activeToolName = null;
-      if (runtime._probeUsage || runtime._probeContext) {
-        // Only overwrite a field this probe cycle actually resolved — a cycle
-        // where one command's reply didn't parse must leave the other's last
-        // known value alone rather than blanking it to undefined.
+      // session/week are genuinely account-wide (same figures no matter which
+      // agent's bridge happens to ask) so they stay in the single global
+      // latestUsage. context is per-agent-session — each agent is a separate
+      // --resume'd conversation with its own context window — so it's kept
+      // on this runtime instead, and broadcast with the agentId a client
+      // needs to know whether it actually applies to the chat it has open.
+      if (runtime._probeUsage) {
         latestUsage = { ...latestUsage, ...runtime._probeUsage, updatedAt: Date.now() };
-        if (runtime._probeContext) latestUsage.context = runtime._probeContext;
         broadcast({ type: 'usage_update', usage: latestUsage });
+      }
+      if (runtime._probeContext) {
+        runtime.latestContext = { ...runtime._probeContext, updatedAt: Date.now() };
+        broadcast({ type: 'context_update', agentId: agent.id, context: runtime.latestContext });
       }
 
       // This probe was the one kicked off right after a /compact finished, so
@@ -627,12 +645,15 @@ setInterval(() => {
   }
 }, 60 * 60 * 1000); // hourly check is plenty coarse for a ~24h threshold
 
-// ---- Account usage tracking: the CLI doesn't push this proactively, so we
-// ask via an invisible `/usage` probe whenever the numbers could plausibly
-// have changed (see the two call sites below) — account-wide, so it's
-// stored globally rather than per-agent. The probe is invisible (handled
-// specially in turn_done), so it won't flicker a stray "Thinking…" into view.
-let latestUsage = null; // { session: {...}|null, week: {...}|null, context: {...}|null, updatedAt }
+// ---- Usage tracking: the CLI doesn't push this proactively, so we ask via
+// an invisible `/usage` + `/context` probe whenever the numbers could
+// plausibly have changed (see the two call sites below). The probe is
+// invisible (handled specially in turn_done), so it won't flicker a stray
+// "Thinking…" into view. session/week are account-wide and stored globally
+// here; context is per-agent-session and stored on each runtime instead
+// (runtime.latestContext) — folding it into this global was the bug behind
+// every agent's context bar showing whichever agent was probed last.
+let latestUsage = null; // { session: {...}|null, week: {...}|null, updatedAt }
 
 // Context is per-session, not account-wide like session/week, so the probe
 // prefers the agent whose chat is actually open — otherwise the bar would
@@ -700,6 +721,7 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
     totalCount: allMessages.length,
     working: isReallyWorking(runtime) ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
+    context: runtime?.latestContext || null,
   });
 });
 
@@ -970,7 +992,7 @@ wss.on('connection', (ws, req) => {
         // generic "Thinking". The context reading taken now is the "before"
         // half of the token delta reported when it finishes.
         if (/^\/compact\b/i.test(msg.text.trim())) {
-          runtime.compacting = { startedAt: Date.now(), tokensBefore: latestUsage?.context?.tokensUsed ?? null };
+          runtime.compacting = { startedAt: Date.now(), tokensBefore: runtime.latestContext?.tokensUsed ?? null };
           broadcast({ type: 'compacting', agentId: msg.agentId, startedAt: runtime.compacting.startedAt });
         }
         broadcastRosterEntry(msg.agentId);

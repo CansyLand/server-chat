@@ -412,6 +412,11 @@ async function openAgent(agentId) {
     messagePagination.hasMore = data.hasMore;
     messagePagination.oldestLoadedId = data.messages?.[0]?.id || null;
     scrollToBottom();
+    // This agent's own context reading — never whatever was left on screen
+    // from the previously open agent, and never a stale one carried over
+    // from before a model switch (the server discards it on bridge restart,
+    // so null here correctly means "no reading yet, next check will fill it in").
+    renderContextUsage(data.context);
     compactingSince = data.compacting?.startedAt ?? null;
     if (data.working) {
       // Opening (or reopening, after a reconnect) a chat mid-turn: replay
@@ -1173,8 +1178,20 @@ function handleServerEvent(msg) {
     case 'roster_entry':
       roster.set(msg.agent.id, msg.agent);
       if (!listViewEl.hidden) renderAgentList();
-      if (currentAgentId === msg.agent.id) syncModelSelect(msg.agent);
+      if (currentAgentId === msg.agent.id) {
+        syncModelSelect(msg.agent);
+        // A model switch restarts this agent's bridge, which discards its
+        // old context reading (a different model has a different context
+        // window, so the old percentage would just be wrong) — reflect that
+        // as "unknown, waiting for next check" rather than leaving the
+        // previous model's stale number on screen.
+        renderContextUsage(msg.agent.context);
+      }
       setBadgeLocal(totalUnreadFromRoster());
+      break;
+
+    case 'context_update':
+      if (msg.agentId === currentAgentId) renderContextUsage(msg.context);
       break;
 
     case 'usage_update':
@@ -1501,8 +1518,13 @@ function formatResumeTime(ms) {
   return new Date(ms).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
 }
 
-// Account-wide (not per-agent) -- same two bars regardless of which chat is
-// open, since the underlying limits are shared across every agent here.
+// Session/week are genuinely account-wide — same figures regardless of which
+// chat is open, since the underlying rate limits are shared across every
+// agent. Context is NOT account-wide (each agent is a separate --resume'd
+// conversation against its own context window) and is deliberately handled
+// by a separate function below — folding it into this one was the bug
+// behind every agent's context bar showing whichever agent last happened to
+// be probed, instead of the one actually on screen.
 function renderUsage(usage) {
   usageSessionFill.style.width = (usage?.session?.percent ?? 0) + "%";
   usageSessionBar.title = usage?.session
@@ -1512,10 +1534,17 @@ function renderUsage(usage) {
   usageWeekBar.title = usage?.week
     ? `Week: ${usage.week.percent}% used · resets ${usage.week.resetsLabel}`
     : "";
-  usageContextFill.style.width = (usage?.context?.percent ?? 0) + "%";
-  usageContextBar.title = usage?.context
-    ? `Context: ${usage.context.percent}% used · ${usage.context.tokensUsed}/${usage.context.tokensTotal} tokens`
-    : "";
+}
+
+// Renders the context bar for whichever agent is passed in — callers are
+// responsible for only calling this with the currently *open* agent's
+// reading (or null, e.g. right after a model switch discards the old
+// reading and no new probe has landed yet), never a different agent's.
+function renderContextUsage(context) {
+  usageContextFill.style.width = (context?.percent ?? 0) + "%";
+  usageContextBar.title = context
+    ? `Context: ${context.percent}% used · ${context.tokensUsed}/${context.tokensTotal} tokens`
+    : 'Context: unknown — waiting for next check';
 }
 
 function startWorkIndicator(startedAt, toolName, waitingUntil) {
