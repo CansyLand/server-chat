@@ -1355,7 +1355,10 @@ let compactingSince = null;
 // Live tool tracking: toolUseId -> DOM element
 const liveTools = new Map();
 
-// ---- Live tool display: shows tool invocations and results as they happen
+// ---- Live tool display: shows tool invocations and results as they happen,
+// collapsed by default (like the persisted .tools block) so a run with many
+// calls doesn't turn the feed into a wall of JSON — the name + live status
+// stays visible in the summary, full input/result is one tap away.
 function createLiveTool(toolUseId, name, input) {
   const el = document.createElement('div');
   el.className = 'msg assistant live-tool';
@@ -1365,7 +1368,10 @@ function createLiveTool(toolUseId, name, input) {
   const bubble = document.createElement('div');
   bubble.className = 'bubble tool-bubble';
 
-  const header = document.createElement('div');
+  const details = document.createElement('details');
+  details.className = 'tool-details';
+
+  const header = document.createElement('summary');
   header.className = 'tool-header';
   const nameEl = document.createElement('span');
   nameEl.className = 'tool-name';
@@ -1374,6 +1380,7 @@ function createLiveTool(toolUseId, name, input) {
   statusEl.className = 'tool-status running';
   statusEl.textContent = 'Running…';
   header.append(nameEl, statusEl);
+  details.appendChild(header);
 
   const inputEl = document.createElement('pre');
   inputEl.className = 'tool-input';
@@ -1383,7 +1390,8 @@ function createLiveTool(toolUseId, name, input) {
   resultEl.className = 'tool-result hidden';
   resultEl.textContent = 'Waiting for result…';
 
-  bubble.append(header, inputEl, resultEl);
+  details.append(inputEl, resultEl);
+  bubble.appendChild(details);
   el.appendChild(bubble);
   messagesEl.appendChild(el);
   liveTools.set(toolUseId, el);

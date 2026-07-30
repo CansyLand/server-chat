@@ -790,12 +790,19 @@ header .title { font-weight: 600; }
   border-radius: 12px;
   padding: 8px 12px;
 }
+.tool-details {
+  cursor: pointer;
+}
+.tool-details[open] .tool-header {
+  margin-bottom: 6px;
+}
 .tool-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
   font-size: 0.8rem;
+  cursor: pointer;
+  user-select: none;
 }
 .tool-name {
   font-weight: 600;
