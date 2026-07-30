@@ -661,13 +661,22 @@ function attemptRetrySend(agentId, attempt) {
   }
 }
 
-for (const agent of store.listAgents()) startAgentBridge(agent);
-
 // ---- Idle sleep: an agent nobody has messaged in a day is pure idle
 // memory (~200MB+ per resident `claude` process) for no benefit — waking
 // it back up on the next message is just a normal --resume, so there's no
 // real cost to letting it go to sleep in between. ----
 const IDLE_SLEEP_MS = 24 * 60 * 60 * 1000;
+
+// Sleep state otherwise lives only in the `runtimes` map (absence = asleep),
+// which a restart wipes clean — without this check every agent, including
+// ones that had been asleep for weeks, would come back resident the moment
+// the process restarts, defeating the whole point of idle sleep. An agent
+// mid-wait for a session-limit reset always starts anyway so that retry
+// isn't lost (see the waitingUntil handling inside startAgentBridge).
+for (const agent of store.listAgents()) {
+  const idle = !agent.waitingUntil && Date.now() - lastActivityTs(agent.id) > IDLE_SLEEP_MS;
+  if (!idle) startAgentBridge(agent);
+}
 
 setInterval(() => {
   const now = Date.now();
