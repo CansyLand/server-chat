@@ -219,10 +219,18 @@ function rosterEntry(agent) {
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
     lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
-    working: runtime?.turnStartedAt ? liveTurnState(runtime) : null,
+    working: isReallyWorking(runtime) ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
     sleeping: !runtime,
   };
+}
+
+// turnStartedAt is also set while an invisible /usage or /context probe is
+// in flight (see refreshUsage) — that's real bridge activity, just not
+// anything the user asked for, so it must never surface as a "working"
+// state a client would render a live bubble for.
+function isReallyWorking(runtime) {
+  return !!runtime?.turnStartedAt && !runtime.usageProbe;
 }
 
 // Everything a client needs to reconstruct the in-flight turn from scratch —
@@ -305,23 +313,35 @@ function startAgentBridge(agent) {
   });
 
   bridge.on('delta', (text) => {
+    // Invisible background probes (/usage, /context) run the bridge through
+    // a real turn under the hood, and their turn_done is already suppressed
+    // from becoming a visible message — but that suppression happens too
+    // late to stop *these* live events, which fire the moment the model
+    // starts responding. Without this guard, a probe that happens to
+    // stream/think/call a tool (plausible for any reasoning-capable model,
+    // and probes fire after every real reply) shows a phantom live bubble
+    // that has nothing to do with anything the user actually asked for.
+    if (runtime.usageProbe > 0) return;
     runtime.liveDeltaBuffer += text;
     broadcast({ type: 'delta', agentId: agent.id, text });
   });
 
   bridge.on('thinking_start', () => {
+    if (runtime.usageProbe > 0) return;
     runtime.liveThinkingText = '';
     runtime.liveThinkingTokens = 0;
     broadcast({ type: 'thinking_start', agentId: agent.id });
   });
 
   bridge.on('thinking_delta', ({ text, estimatedTokens }) => {
+    if (runtime.usageProbe > 0) return;
     if (text) runtime.liveThinkingText += text;
     if (estimatedTokens) runtime.liveThinkingTokens += estimatedTokens;
     broadcast({ type: 'thinking_delta', agentId: agent.id, text, tokens: runtime.liveThinkingTokens });
   });
 
   bridge.on('thinking_final', ({ text }) => {
+    if (runtime.usageProbe > 0) return;
     // The CLI's own final block is authoritative over whatever was
     // accumulated from deltas — covers cases where a delta was missed, and
     // is a no-op when the two already agree.
@@ -329,6 +349,7 @@ function startAgentBridge(agent) {
   });
 
   bridge.on('tool_use', ({ id, name, input }) => {
+    if (runtime.usageProbe > 0) return;
     if (!runtime.currentTurn) runtime.currentTurn = { tools: [] };
     runtime.currentTurn.tools.push({ id, name, input, result: null, isError: false });
     runtime.activeToolName = name;
@@ -337,6 +358,7 @@ function startAgentBridge(agent) {
   });
 
   bridge.on('tool_result', ({ toolUseId, isError, content }) => {
+    if (runtime.usageProbe > 0) return;
     if (!runtime.currentTurn) runtime.currentTurn = { tools: [] };
     const tool = runtime.currentTurn.tools.find((t) => t.id === toolUseId);
     const preview = toolResultPreview(content);
@@ -676,7 +698,7 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
     messages,
     hasMore,
     totalCount: allMessages.length,
-    working: runtime?.turnStartedAt ? liveTurnState(runtime) : null,
+    working: isReallyWorking(runtime) ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
   });
 });
