@@ -14,6 +14,7 @@ const usageWeekBar = $('#usage-week-bar');
 const usageWeekFill = $('#usage-week-fill');
 const usageContextBar = $('#usage-context-bar');
 const usageContextFill = $('#usage-context-fill');
+const compactBtn = $('#compact-btn');
 const todoBtn = $('#todo-btn');
 const todoBadge = $('#todo-badge');
 const todoModal = $('#todo-modal');
@@ -464,6 +465,10 @@ async function loadMoreMessages() {
     const scrollHeightBefore = messagesEl.scrollHeight;
     const fragment = document.createDocumentFragment();
     for (const m of olderMessages) {
+      if (m.role === 'compact-summary') {
+        fragment.appendChild(buildCompactSummaryEl(m));
+        continue;
+      }
       const el = document.createElement('div');
       el.id = 'm-' + m.id;
       el.className = `msg ${m.role}`;
@@ -518,6 +523,11 @@ messagesEl.addEventListener('scroll', () => {
 function setupNav() {
   backBtn.addEventListener('click', showListView);
 }
+
+// A shortcut for typing "/compact" by hand — same message, just one tap.
+compactBtn.addEventListener('click', () => {
+  sendMessage('/compact');
+});
 
 // ---- Agent creation / editing (one sheet, two modes) ----
 const AGENT_EMOJIS = [
@@ -1853,6 +1863,11 @@ function buildThinkingDetails(text, tokens) {
 }
 
 function renderMessage(m) {
+  if (m.role === 'compact-summary') {
+    messagesEl.appendChild(buildCompactSummaryEl(m));
+    return;
+  }
+
   const el = document.createElement('div');
   el.className = `msg ${m.role}`;
   el.id = 'm-' + m.id;
@@ -1915,9 +1930,10 @@ function formatCompactTokens(n) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
-function renderCompactSummary(msg) {
+function buildCompactSummaryEl(msg) {
   const el = document.createElement('div');
   el.className = 'msg compact-summary';
+  if (msg.id) el.id = 'm-' + msg.id;
 
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
@@ -1954,7 +1970,13 @@ function renderCompactSummary(msg) {
   bubble.appendChild(detail);
 
   el.appendChild(bubble);
-  messagesEl.appendChild(el);
+  return el;
+}
+
+// Live path: the compact_done WS event fires the instant a /compact finishes,
+// well before the persisted copy could round-trip through a history reload.
+function renderCompactSummary(msg) {
+  messagesEl.appendChild(buildCompactSummaryEl(msg));
   scrollToBottom();
 }
 
@@ -2030,10 +2052,29 @@ function setupVisibility(token) {
     }
   });
 
-  navigator.serviceWorker?.addEventListener('message', (event) => {
+  navigator.serviceWorker?.addEventListener('message', async (event) => {
     if (event.data?.type === 'notification-click') {
       const targetAgentId = event.data.agentId;
-      if (targetAgentId && roster.has(targetAgentId)) {
+      if (!targetAgentId) {
+        setBadgeLocal(totalUnreadFromRoster());
+        return;
+      }
+      // The in-memory roster can be stale by the time this fires — e.g. the
+      // tap resumed a page that had been backgrounded (and disconnected)
+      // long enough that the roster snapshot in memory predates the agent,
+      // or predates whichever tab/reconnect last refreshed it. One retry
+      // against a fresh fetch before giving up, rather than silently
+      // stranding the user on whatever conversation happened to be open.
+      if (!roster.has(targetAgentId)) {
+        try {
+          const res = await fetch('/api/roster', { headers: { Authorization: `Bearer ${currentToken}` } });
+          const data = await res.json();
+          for (const a of data.agents) roster.set(a.id, a);
+        } catch {
+          /* offline — fall through to the badge-only fallback below */
+        }
+      }
+      if (roster.has(targetAgentId)) {
         openAgent(targetAgentId);
       } else {
         setBadgeLocal(totalUnreadFromRoster());

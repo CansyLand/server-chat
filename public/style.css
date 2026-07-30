@@ -362,6 +362,27 @@ header .title { font-weight: 600; }
   align-items: center;
   justify-content: center;
 }
+#compact-btn {
+  position: absolute;
+  top: 100%;
+  right: 56px;
+  margin-top: 8px;
+  z-index: 5;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  border: none;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+  font-size: 1rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+#compact-btn:disabled {
+  opacity: 0.5;
+}
 .todo-badge {
   position: absolute;
   top: -4px;

@@ -253,7 +253,10 @@ function rosterEntry(agent) {
     provider: agent.provider || 'anthropic',
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
-    lastMessage: last ? { text: last.text, role: last.role, ts: last.ts } : null,
+    // compact-summary entries carry no .text (they're a token-count marker,
+    // not a chat message) — give the list-view preview a stand-in string
+    // instead of undefined, which would crash extractOptions() client-side.
+    lastMessage: last ? { text: last.text ?? 'Conversation compacted', role: last.role, ts: last.ts } : null,
     working: isReallyWorking(runtime) ? liveTurnState(runtime) : null,
     compacting: runtime?.compacting ? { startedAt: runtime.compacting.startedAt } : null,
     sleeping: !runtime,
@@ -459,16 +462,22 @@ function startAgentBridge(agent) {
       const done = runtime.compactedAt;
       if (done) {
         runtime.compactedAt = null;
-        broadcast({
-          type: 'compact_done',
-          agentId: agent.id,
+        const compactMessage = {
+          id: randomUUID(),
+          role: 'compact-summary',
+          ts: Date.now(),
           tokensBefore: done.tokensBefore,
           tokensAfter: runtime._probeContext?.tokensUsed ?? null,
           percentAfter: runtime._probeContext?.percent ?? null,
           durationMs: done.durationMs,
           wasInterrupted: done.wasInterrupted,
           isError: done.isError,
-        });
+        };
+        // Persisted (not just broadcast) so the marker survives a reload or
+        // reopen — otherwise the only record that a compaction happened was
+        // this one live WS event, gone the moment the page refreshes.
+        store.addMessage(agent.id, compactMessage);
+        broadcast({ type: 'compact_done', agentId: agent.id, ...compactMessage });
       }
 
       delete runtime._probeUsage;
