@@ -1022,6 +1022,14 @@ wss.on('connection', (ws, req) => {
         store.clearUnread(ws.openAgentId);
         broadcastRosterEntry(ws.openAgentId);
       }
+      // Context is only ever refreshed after a real turn completes or on a
+      // fresh WS connection — neither happens just from switching to a
+      // different agent's chat. Without this, any agent that hasn't yet had
+      // a turn complete since its bridge last started (first-ever message,
+      // right after a model switch, right after a service restart) shows an
+      // empty bar indefinitely: nothing else was ever going to ask for its
+      // number. refreshUsage is a no-op if that agent is genuinely busy.
+      if (ws.openAgentId) refreshUsage(ws.openAgentId);
     } else if (msg.type === 'visibility') {
       ws.isVisible = !!msg.visible;
       if (ws.isVisible && ws.openAgentId) {
