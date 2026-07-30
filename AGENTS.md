@@ -55,6 +55,20 @@ needed.
 
 ---
 
+## Never restart the service yourself
+
+The chat app you're reading this through *is* this service — `systemctl
+restart xqlytskg-chat`, killing/exiting the node process, or calling
+`POST /api/restart` or `POST /api/deploy` all cut the connection the human
+is talking to you over. Doing this on your own initiative drops them
+mid-conversation with no warning.
+
+**Always ask the human to restart it themselves** (or explicitly confirm
+first) rather than running the restart/deploy step on your own. This
+applies to every agent working in this repo, not just one instance.
+
+---
+
 ## CodeGraph MCP
 
 A local codebase graph server (tree-sitter + SQLite) exposed via MCP.

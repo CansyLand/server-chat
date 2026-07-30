@@ -53,6 +53,7 @@ const settingsBtn = $('#settings-btn');
 const settingsModal = $('#settings-modal');
 const settingsVersionEl = $('#settings-version');
 const settingsUpdateBtn = $('#settings-update-btn');
+const settingsDeployBtn = $('#settings-deploy-btn');
 const settingsRestartBtn = $('#settings-restart-btn');
 const settingsCloseBtn = $('#settings-close-btn');
 
@@ -1016,6 +1017,33 @@ function setupSettings(token) {
       /* ignore */
     }
     location.reload();
+  });
+
+  settingsDeployBtn.addEventListener('click', async () => {
+    if (!confirm('Pull the latest main branch from git and restart the service?')) {
+      return;
+    }
+    settingsDeployBtn.disabled = true;
+    settingsDeployBtn.textContent = 'Pulling…';
+    try {
+      const res = await fetch('/api/deploy', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+      const data = await res.json();
+      if (!data.ok) throw new Error(data.error || 'update failed');
+      if (!data.updated) {
+        settingsDeployBtn.textContent = 'Already up to date';
+        setTimeout(() => {
+          settingsDeployBtn.disabled = false;
+          settingsDeployBtn.textContent = 'Pull latest & restart';
+        }, 2000);
+        return;
+      }
+      settingsDeployBtn.textContent = 'Restarting…';
+      settingsModal.hidden = true;
+    } catch (err) {
+      alert(`Update failed: ${err.message}`);
+    }
+    settingsDeployBtn.disabled = false;
+    settingsDeployBtn.textContent = 'Pull latest & restart';
   });
 
   settingsRestartBtn.addEventListener('click', async () => {

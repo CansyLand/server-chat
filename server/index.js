@@ -2,8 +2,12 @@ import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
 import fs from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'node:crypto';
+
+const execFileAsync = promisify(execFile);
 
 import { store } from './store.js';
 import { requireAuth, checkToken, isBanned, recordFailure, recordSuccess, timingSafeEqual, DEVICE_TOKEN } from './auth.js';
@@ -159,6 +163,37 @@ app.post('/api/restart', requireAuth, (req, res) => {
     for (const { bridge } of runtimes.values()) bridge.stop();
     process.exit(0);
   }, 300);
+});
+
+// Pulls the latest `main` from origin and restarts so the new code takes
+// effect. --ff-only refuses to run if the working tree has diverged (it
+// shouldn't — data/ and logs/ are gitignored) rather than silently merging
+// or discarding anything. npm install only runs when package.json actually
+// changed, since it's the slow part of every deploy.
+app.post('/api/deploy', requireAuth, async (req, res) => {
+  const cwd = process.cwd();
+  try {
+    const before = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+    await execFileAsync('git', ['pull', '--ff-only', 'origin', 'main'], { cwd });
+    const after = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd })).stdout.trim();
+
+    if (before === after) {
+      return res.json({ ok: true, updated: false });
+    }
+
+    const { stdout: changedFiles } = await execFileAsync('git', ['diff', '--name-only', before, after], { cwd });
+    if (/(^|\n)package(-lock)?\.json$/.test(changedFiles)) {
+      await execFileAsync('npm', ['install'], { cwd });
+    }
+
+    res.json({ ok: true, updated: true });
+    setTimeout(() => {
+      for (const { bridge } of runtimes.values()) bridge.stop();
+      process.exit(0);
+    }, 300);
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.stderr?.toString().trim() || err.message || String(err) });
+  }
 });
 
 // ---- Agent runtime: one persistent Claude session per agent, all running
