@@ -863,7 +863,7 @@ app.post('/api/agents', requireAuth, (req, res) => {
     emoji: emoji.trim().slice(0, 8),
     color: typeof color === 'string' && color ? color : '#7c9cff',
     workdir: dir,
-    systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, 4000) : null,
+    systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, 8000) : null,
     model: isOpenRouter ? model.trim().slice(0, 200) : (VALID_MODELS.includes(model) ? model : null),
     provider: isOpenRouter ? 'openrouter' : null,
   });
@@ -898,7 +898,7 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
     bridgeParamsChanged = true;
   }
   if (typeof body.systemPrompt === 'string') {
-    const sp = body.systemPrompt.trim() ? body.systemPrompt.trim().slice(0, 4000) : null;
+    const sp = body.systemPrompt.trim() ? body.systemPrompt.trim().slice(0, 8000) : null;
     if (sp !== agent.systemPrompt) {
       patch.systemPrompt = sp;
       bridgeParamsChanged = true;
