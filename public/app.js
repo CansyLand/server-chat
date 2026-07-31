@@ -1291,7 +1291,6 @@ function handleServerEvent(msg) {
         liveThinkingTokens = msg.tokens || liveThinkingTokens;
         setWorkLabel('Thinking');
         renderLiveThinking();
-        scrollToBottom();
       }
       break;
 
@@ -1414,7 +1413,6 @@ function createLiveTool(toolUseId, name, input) {
   el.appendChild(bubble);
   messagesEl.appendChild(el);
   liveTools.set(toolUseId, el);
-  scrollToBottom();
 }
 
 function updateLiveTool(toolUseId, isError, preview) {
@@ -1431,7 +1429,6 @@ function updateLiveTool(toolUseId, isError, preview) {
     resultEl.classList.remove('hidden');
     if (isError) resultEl.classList.add('error');
   }
-  scrollToBottom();
 }
 
 function clearLiveTools() {
@@ -1623,6 +1620,7 @@ function startWorkIndicator(startedAt, toolName, waitingUntil) {
     liveRawText = '';
     liveThinkingText = '';
     liveThinkingTokens = 0;
+    scrollToBottom();
   }
   workStartTs = startedAt;
   liveBubble.classList.toggle('waiting', !!waitingUntil);
@@ -1647,7 +1645,6 @@ function startWorkIndicator(startedAt, toolName, waitingUntil) {
     if (!workTimerId) workTimerId = setInterval(updateWorkTimer, 1000);
   }
   liveBubble.classList.toggle('compacting', !!compactingSince);
-  scrollToBottom();
   updateSendButtonMode();
 }
 
