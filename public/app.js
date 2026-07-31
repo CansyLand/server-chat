@@ -315,11 +315,23 @@ function buildAgentRow(entry) {
   time.className = 'agent-row-time';
   time.textContent = formatPreviewTime(entry.lastMessage?.ts);
   meta.appendChild(time);
-  if (entry.unreadCount > 0) {
-    const badge = document.createElement('span');
-    badge.className = 'agent-row-badge';
-    badge.textContent = entry.unreadCount > 99 ? '99+' : String(entry.unreadCount);
-    meta.appendChild(badge);
+  if (entry.openTodoCount > 0 || entry.unreadCount > 0) {
+    const badges = document.createElement('span');
+    badges.className = 'agent-row-badges';
+    if (entry.openTodoCount > 0) {
+      const todoBadge = document.createElement('span');
+      todoBadge.className = 'agent-row-todo-badge';
+      todoBadge.title = `${entry.openTodoCount} open task${entry.openTodoCount === 1 ? '' : 's'}`;
+      todoBadge.textContent = `✅ ${entry.openTodoCount > 99 ? '99+' : entry.openTodoCount}`;
+      badges.appendChild(todoBadge);
+    }
+    if (entry.unreadCount > 0) {
+      const badge = document.createElement('span');
+      badge.className = 'agent-row-badge';
+      badge.textContent = entry.unreadCount > 99 ? '99+' : String(entry.unreadCount);
+      badges.appendChild(badge);
+    }
+    meta.appendChild(badges);
   }
 
   row.append(avatar, body, meta);

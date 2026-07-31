@@ -257,6 +257,24 @@ html, body {
   gap: 6px;
 }
 .agent-row-time { font-size: 0.72rem; color: var(--text-dim); }
+.agent-row-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.agent-row-todo-badge {
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 10px;
+  background: var(--bubble-assistant);
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
 .agent-row-badge {
   min-width: 20px;
   height: 20px;

@@ -253,6 +253,7 @@ function rosterEntry(agent) {
     provider: agent.provider || 'anthropic',
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
+    openTodoCount: store.getTodos(agent.id).filter((t) => t.status !== 'done').length,
     // compact-summary entries carry no .text (they're a token-count marker,
     // not a chat message) — give the list-view preview a stand-in string
     // instead of undefined, which would crash extractOptions() client-side.
@@ -824,6 +825,9 @@ app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
 
 function broadcastTodos(agentId) {
   broadcast({ type: 'todos_update', agentId, todos: store.getTodos(agentId) });
+  // Also refresh the roster entry so the list-view open-task badge updates
+  // live, without requiring the agent's own chat/todo panel to be open.
+  broadcastRosterEntry(agentId);
 }
 
 app.get('/api/agents/:id/todos', requireAuth, (req, res) => {
