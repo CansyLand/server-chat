@@ -14,6 +14,7 @@ const usageWeekBar = $('#usage-week-bar');
 const usageWeekFill = $('#usage-week-fill');
 const usageContextBar = $('#usage-context-bar');
 const usageContextFill = $('#usage-context-fill');
+const clearBtn = $('#clear-btn');
 const compactBtn = $('#compact-btn');
 const todoBtn = $('#todo-btn');
 const todoBadge = $('#todo-badge');
@@ -527,6 +528,14 @@ function setupNav() {
 // A shortcut for typing "/compact" by hand — same message, just one tap.
 compactBtn.addEventListener('click', () => {
   sendMessage('/compact');
+});
+
+// /clear wipes the conversation's context outright (unlike /compact, which
+// summarizes) — confirm first, same as the other destructive actions here.
+clearBtn.addEventListener('click', () => {
+  if (confirm('Clear this conversation? This resets its context.')) {
+    sendMessage('/clear');
+  }
 });
 
 // ---- Agent creation / editing (one sheet, two modes) ----
