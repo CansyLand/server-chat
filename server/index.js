@@ -19,6 +19,10 @@ const PUBLIC_DIR = path.join(process.cwd(), 'public');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'data', 'pairing-code.secret');
 const DEFAULT_WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 const VALID_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+// Cap on a stored agent persona. Mirrored by PERSONA_MAX_CHARS in public/app.js,
+// which shows a live counter — keep the two in sync. ~16k chars is ~4k tokens,
+// which is a reasonable ceiling for a detailed project-specific persona.
+const PERSONA_MAX_CHARS = 16000;
 const VALID_PROVIDERS = ['anthropic', 'openrouter'];
 
 // Free-tier/alt-model routing: OpenRouter exposes an Anthropic-Messages-API
@@ -911,7 +915,7 @@ app.post('/api/agents', requireAuth, (req, res) => {
     emoji: emoji.trim().slice(0, 8),
     color: typeof color === 'string' && color ? color : '#7c9cff',
     workdir: dir,
-    systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, 8000) : null,
+    systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, PERSONA_MAX_CHARS) : null,
     model: isOpenRouter ? model.trim().slice(0, 200) : (VALID_MODELS.includes(model) ? model : null),
     provider: isOpenRouter ? 'openrouter' : null,
   });
@@ -946,7 +950,7 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
     bridgeParamsChanged = true;
   }
   if (typeof body.systemPrompt === 'string') {
-    const sp = body.systemPrompt.trim() ? body.systemPrompt.trim().slice(0, 8000) : null;
+    const sp = body.systemPrompt.trim() ? body.systemPrompt.trim().slice(0, PERSONA_MAX_CHARS) : null;
     if (sp !== agent.systemPrompt) {
       patch.systemPrompt = sp;
       bridgeParamsChanged = true;

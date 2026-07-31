@@ -577,7 +577,7 @@ buildEmojiPicker();
 
 // Server truncates systemPrompt to this many characters (server/index.js);
 // token count is a rough chars/4 estimate, not a real tokenizer count.
-const PERSONA_MAX_CHARS = 8000;
+const PERSONA_MAX_CHARS = 16000;
 
 function updatePersonaCounter() {
   const len = newAgentPersonaInput.value.length;
