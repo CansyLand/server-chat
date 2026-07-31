@@ -771,26 +771,30 @@ header .title { font-weight: 600; }
   .msg.live.compacting .bubble::after { animation: none; }
 }
 
-/* The end-of-compaction marker — a centered system note, visually distinct
-   from both sides of the conversation since it is neither. */
-.msg.compact-summary {
+/* The end-of-compaction / end-of-clear marker — a centered system note,
+   visually distinct from both sides of the conversation since it is
+   neither. Shared between /compact and /clear, which differ only in the
+   text buildCompactSummaryEl() fills in. */
+.msg.compact-summary,
+.msg.clear-summary {
   align-self: center;
   max-width: 90%;
   margin: 4px 0;
 }
-.msg.compact-summary .bubble {
+.msg.compact-summary .bubble,
+.msg.clear-summary .bubble {
   background: transparent;
   border: 1px dashed rgba(77, 163, 255, 0.4);
   border-radius: 10px;
   padding: 7px 12px;
   text-align: center;
 }
-.compact-title {
+.summary-title {
   font-size: 0.8rem;
   font-weight: 600;
   color: var(--context-blue);
 }
-.compact-detail {
+.summary-detail {
   font-size: 0.72rem;
   color: var(--text-dim);
   margin-top: 2px;

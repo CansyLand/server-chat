@@ -336,6 +336,8 @@ function startAgentBridge(agent) {
     usageProbe: 0, // counter: number of pending probe commands (usage, context, etc.)
     compacting: null, // { startedAt, tokensBefore } while a /compact is in flight
     compactedAt: null, // carries the finished compaction until the after-probe lands
+    clearing: null, // { startedAt, tokensBefore } while a /clear is in flight
+    clearedAt: null, // carries the finished clear until the after-probe lands
     // Thinking, accumulated live and persisted with the turn's final message
     // so it survives a reconnect the same way tool calls do (see the
     // liveThinkingText/liveThinkingTokens fields below, mirrored into the
@@ -480,6 +482,26 @@ function startAgentBridge(agent) {
         broadcast({ type: 'compact_done', agentId: agent.id, ...compactMessage });
       }
 
+      // Same idea, for a /clear that just finished — see the /compact block
+      // above for why this waits on the probe instead of computing it inline.
+      const doneClear = runtime.clearedAt;
+      if (doneClear) {
+        runtime.clearedAt = null;
+        const clearMessage = {
+          id: randomUUID(),
+          role: 'clear-summary',
+          ts: Date.now(),
+          tokensBefore: doneClear.tokensBefore,
+          tokensAfter: runtime._probeContext?.tokensUsed ?? null,
+          percentAfter: runtime._probeContext?.percent ?? null,
+          durationMs: doneClear.durationMs,
+          wasInterrupted: doneClear.wasInterrupted,
+          isError: doneClear.isError,
+        };
+        store.addMessage(agent.id, clearMessage);
+        broadcast({ type: 'clear_done', agentId: agent.id, ...clearMessage });
+      }
+
       delete runtime._probeUsage;
       delete runtime._probeContext;
       broadcastRosterEntry(agent.id); // clears the brief working-indicator state
@@ -521,23 +543,33 @@ function startAgentBridge(agent) {
 
     const finalText = wasInterrupted ? (runtime.liveDeltaBuffer || '_Stopped before responding._') : text;
 
-    const message = {
-      id: randomUUID(),
-      role: 'assistant',
-      text: finalText,
-      ts: Date.now(),
-      isError: wasInterrupted ? false : isError,
-      tools: runtime.currentTurn?.tools || [],
-      // Persisted alongside tools so it's collapsible the same way once the
-      // turn is done, and so it survives a reconnect/history-load instead of
-      // only existing during the live stream. '' (not null) on Anthropic-
-      // native models, where the text itself is redacted server-side — the
-      // token count is kept regardless, since that part is never redacted.
-      thinking: runtime.liveThinkingText || '',
-      thinkingTokens: runtime.liveThinkingTokens || null,
-    };
-    store.addMessage(agent.id, message);
-    broadcast({ type: 'assistant_message', agentId: agent.id, message });
+    const clearing = runtime.clearing;
+    runtime.clearing = null;
+
+    // /clear's own reply is normally empty — that's the "blank speech bubble"
+    // this was otherwise producing — so skip it and let the clear-summary
+    // marker below (once the after-probe lands) be the only visible trace.
+    // A non-empty reply (error text, interrupted-turn placeholder) still gets
+    // shown normally, same as /compact.
+    if (!clearing || finalText.trim()) {
+      const message = {
+        id: randomUUID(),
+        role: 'assistant',
+        text: finalText,
+        ts: Date.now(),
+        isError: wasInterrupted ? false : isError,
+        tools: runtime.currentTurn?.tools || [],
+        // Persisted alongside tools so it's collapsible the same way once the
+        // turn is done, and so it survives a reconnect/history-load instead of
+        // only existing during the live stream. '' (not null) on Anthropic-
+        // native models, where the text itself is redacted server-side — the
+        // token count is kept regardless, since that part is never redacted.
+        thinking: runtime.liveThinkingText || '',
+        thinkingTokens: runtime.liveThinkingTokens || null,
+      };
+      store.addMessage(agent.id, message);
+      broadcast({ type: 'assistant_message', agentId: agent.id, message });
+    }
 
     // A finished /compact gets an explicit end-of-compaction marker rather
     // than leaving the user to infer it from the indicator disappearing.
@@ -560,6 +592,14 @@ function startAgentBridge(agent) {
       runtime.compactedAt = {
         tokensBefore: compacting.tokensBefore,
         durationMs: Date.now() - compacting.startedAt,
+        wasInterrupted,
+        isError: !wasInterrupted && isError,
+      };
+    }
+    if (clearing) {
+      runtime.clearedAt = {
+        tokensBefore: clearing.tokensBefore,
+        durationMs: Date.now() - clearing.startedAt,
         wasInterrupted,
         isError: !wasInterrupted && isError,
       };
@@ -592,7 +632,11 @@ function startAgentBridge(agent) {
     // clear the flag here or the client's indicator runs forever.
     runtime.compacting = null;
     runtime.compactedAt = null;
+    // Same reasoning, for a /clear that died mid-flight.
+    runtime.clearing = null;
+    runtime.clearedAt = null;
     broadcast({ type: 'compact_done', agentId: agent.id, crashed: true });
+    broadcast({ type: 'clear_done', agentId: agent.id, crashed: true });
     broadcast({ type: 'system', agentId: agent.id, text: `${agent.name}: process restarting…` });
     broadcastRosterEntry(agent.id);
   });
@@ -1047,6 +1091,11 @@ wss.on('connection', (ws, req) => {
         if (/^\/compact\b/i.test(msg.text.trim())) {
           runtime.compacting = { startedAt: Date.now(), tokensBefore: runtime.latestContext?.tokensUsed ?? null };
           broadcast({ type: 'compacting', agentId: msg.agentId, startedAt: runtime.compacting.startedAt });
+        } else if (/^\/clear\b/i.test(msg.text.trim())) {
+          // /clear has no progress or summary of its own — the CLI's reply is
+          // typically empty — so capture the "before" reading now and report
+          // the delta ourselves once the after-probe (below) lands.
+          runtime.clearing = { startedAt: Date.now(), tokensBefore: runtime.latestContext?.tokensUsed ?? null };
         }
         broadcastRosterEntry(msg.agentId);
       } catch (err) {

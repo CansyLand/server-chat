@@ -467,7 +467,7 @@ async function loadMoreMessages() {
     const scrollHeightBefore = messagesEl.scrollHeight;
     const fragment = document.createDocumentFragment();
     for (const m of olderMessages) {
-      if (m.role === 'compact-summary') {
+      if (m.role === 'compact-summary' || m.role === 'clear-summary') {
         fragment.appendChild(buildCompactSummaryEl(m));
         continue;
       }
@@ -1349,6 +1349,17 @@ function handleServerEvent(msg) {
       }
       break;
 
+    case 'clear_done':
+      // /clear's own reply is suppressed server-side when empty (the usual
+      // case), so no 'assistant_message' arrives to stop the work indicator
+      // — do it here instead, same as that case does.
+      if (msg.agentId === currentAgentId) {
+        stopWorkIndicator();
+        clearLiveTools();
+        if (!msg.crashed) renderCompactSummary(msg);
+      }
+      break;
+
     case 'turn_started':
       // The scheduled auto-retry just fired and resent the message — same
       // visual as a fresh send, just with no new user_message bubble to add.
@@ -1883,7 +1894,7 @@ function buildThinkingDetails(text, tokens) {
 }
 
 function renderMessage(m) {
-  if (m.role === 'compact-summary') {
+  if (m.role === 'compact-summary' || m.role === 'clear-summary') {
     messagesEl.appendChild(buildCompactSummaryEl(m));
     return;
   }
@@ -1950,9 +1961,14 @@ function formatCompactTokens(n) {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
+// Shared by the /compact and /clear end-of-turn markers \u2014 both report a
+// measured before/after context reading the same way, differing only in
+// wording (msg.role picks which).
 function buildCompactSummaryEl(msg) {
+  const isClear = msg.role === 'clear-summary';
+
   const el = document.createElement('div');
-  el.className = 'msg compact-summary';
+  el.className = `msg ${msg.role}`;
   if (msg.id) el.id = 'm-' + msg.id;
 
   const bubble = document.createElement('div');
@@ -1964,18 +1980,19 @@ function buildCompactSummaryEl(msg) {
   const before = formatCompactTokens(msg.tokensBefore);
   const after = formatCompactTokens(msg.tokensAfter);
 
+  const noun = isClear ? 'Clear' : 'Compaction';
   let headline;
-  if (msg.isError) headline = '\u26a0\ufe0f Compaction failed';
-  else if (msg.wasInterrupted) headline = '\u26a0\ufe0f Compaction stopped';
-  else headline = '\u2713 Conversation compacted';
+  if (msg.isError) headline = `\u26a0\ufe0f ${noun} failed`;
+  else if (msg.wasInterrupted) headline = `\u26a0\ufe0f ${noun} stopped`;
+  else headline = isClear ? '\u2713 Conversation cleared' : '\u2713 Conversation compacted';
 
   const title = document.createElement('div');
-  title.className = 'compact-title';
+  title.className = 'summary-title';
   title.textContent = headline;
   bubble.appendChild(title);
 
   const detail = document.createElement('div');
-  detail.className = 'compact-detail';
+  detail.className = 'summary-detail';
   if (!msg.isError && !msg.wasInterrupted && before && after) {
     const freed = msg.tokensBefore - msg.tokensAfter;
     const pct = msg.tokensBefore > 0 ? Math.round((freed / msg.tokensBefore) * 100) : 0;
