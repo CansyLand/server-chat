@@ -11,6 +11,20 @@ computed per-install, so nothing below needs editing per deployment.
 This file covers the parts that don't change between installs: the
 endpoint shapes and the intended workflow.
 
+## What must never be committed to this repo
+
+Agent definitions — names, personas/system prompts, working directories — live
+in `data/agents.json`, which is gitignored and install-local. So do the
+`data/*.secret` credential files. That is deliberate: this repo is pulled onto
+unrelated machines running unrelated projects, and one operator's agent roster
+must never turn up in someone else's checkout.
+
+So: never commit agent identities, host-specific paths, or the workflows of
+whatever project this install happens to serve. Project-specific instructions
+belong in *that* project's own repo (or in a `CLAUDE.md` outside this one) —
+never here. Anything you add to this file ships to every install, so it must be
+true for all of them.
+
 ## Task list (todo) API
 
 Every agent has its own task list, separate from chat history, visible to
