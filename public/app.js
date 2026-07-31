@@ -31,6 +31,7 @@ const agentFormIdInput = $('#agent-form-id');
 const newAgentNameInput = $('#new-agent-name');
 const newAgentWorkdirInput = $('#new-agent-workdir');
 const newAgentPersonaInput = $('#new-agent-persona');
+const newAgentPersonaCounterEl = $('#new-agent-persona-counter');
 const newAgentErrorEl = $('#new-agent-error');
 const newAgentSubmitBtn = $('#new-agent-submit');
 const newAgentCancelBtn = $('#new-agent-cancel');
@@ -562,6 +563,17 @@ function buildEmojiPicker() {
 }
 buildEmojiPicker();
 
+// Server truncates systemPrompt to this many characters (server/index.js);
+// token count is a rough chars/4 estimate, not a real tokenizer count.
+const PERSONA_MAX_CHARS = 4000;
+
+function updatePersonaCounter() {
+  const len = newAgentPersonaInput.value.length;
+  const tokens = Math.round(len / 4);
+  newAgentPersonaCounterEl.textContent = `${len} / ${PERSONA_MAX_CHARS} chars · ~${tokens} tokens`;
+  newAgentPersonaCounterEl.classList.toggle('over-limit', len > PERSONA_MAX_CHARS);
+}
+
 function setColorSelection(color) {
   selectedColor = color;
   for (const b of document.querySelectorAll('#new-agent-colors .theme-swatch')) {
@@ -583,6 +595,7 @@ function openAgentForm(agentId) {
   newAgentNameInput.value = entry?.name || '';
   newAgentWorkdirInput.value = entry?.workdir || '';
   newAgentPersonaInput.value = entry?.systemPrompt || '';
+  updatePersonaCounter();
   selectedEmoji = entry?.emoji || AGENT_EMOJIS[0];
   buildEmojiPicker();
   setColorSelection(entry?.color || '#7c9cff');
@@ -603,6 +616,7 @@ function setupNewAgent(token) {
   newAgentModelSelect.addEventListener('change', () => {
     editFormModelTouched = true;
   });
+  newAgentPersonaInput.addEventListener('input', updatePersonaCounter);
   newAgentBtn.addEventListener('click', () => openAgentForm(null));
   agentOptionsBtn.addEventListener('click', () => {
     if (currentAgentId) openAgentForm(currentAgentId);
