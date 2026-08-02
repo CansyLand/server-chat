@@ -374,6 +374,56 @@ header .title { font-weight: 600; }
   background: var(--surface); /* fills the 1px gap between the two bars */
 }
 
+#effort-control {
+  position: absolute;
+  top: 100%;
+  left: 12px;
+  right: 148px;
+  margin-top: 8px;
+  z-index: 5;
+  height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+#effort-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  min-width: 0;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.15);
+  outline: none;
+}
+#effort-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.4);
+}
+#effort-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border: none;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+#effort-label {
+  font-size: 0.68rem;
+  color: var(--text);
+  min-width: 44px;
+  text-align: right;
+  white-space: nowrap;
+}
 #todo-btn {
   position: absolute;
   top: 100%;

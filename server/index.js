@@ -19,6 +19,7 @@ const PUBLIC_DIR = path.join(process.cwd(), 'public');
 const PAIRING_CODE_FILE = path.join(process.cwd(), 'data', 'pairing-code.secret');
 const DEFAULT_WORKDIR = process.env.CLAUDE_WORKDIR || process.env.HOME;
 const VALID_MODELS = ['sonnet', 'opus', 'haiku', 'fable'];
+const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // Cap on a stored agent persona. Mirrored by PERSONA_MAX_CHARS in public/app.js,
 // which shows a live counter — keep the two in sync. ~16k chars is ~4k tokens,
 // which is a reasonable ceiling for a detailed project-specific persona.
@@ -41,7 +42,7 @@ function openRouterEnv() {
   return { ANTHROPIC_BASE_URL: 'https://openrouter.ai/api', ANTHROPIC_AUTH_TOKEN: key, ANTHROPIC_API_KEY: '' };
 }
 function bridgeConfigKey(agent) {
-  return `${agent.provider || 'anthropic'}::${agent.model || ''}`;
+  return `${agent.provider || 'anthropic'}::${agent.model || ''}::${agent.effort || ''}`;
 }
 
 // "You've hit your session limit · resets 2:30am (UTC)" — matched leniently
@@ -255,6 +256,7 @@ function rosterEntry(agent) {
     systemPrompt: agent.systemPrompt,
     model: agent.model || 'sonnet',
     provider: agent.provider || 'anthropic',
+    effort: agent.effort || 'medium',
     slashCommands: runtime?.slashCommands || [],
     unreadCount: store.getUnreadCount(agent.id),
     openTodoCount: store.getTodos(agent.id).filter((t) => t.status !== 'done').length,
@@ -332,6 +334,7 @@ function startAgentBridge(agent) {
     workdir: agent.workdir,
     systemPrompt: buildFullSystemPrompt(agent),
     model: agent.model,
+    effort: agent.effort,
     extraEnv: agent.provider === 'openrouter' ? openRouterEnv() : null,
   });
   bridge.configKey = bridgeConfigKey(agent);
@@ -979,6 +982,16 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
       patch.model = VALID_MODELS.includes(nextModel) ? nextModel : null;
     }
     patch.provider = nextProvider === 'anthropic' ? null : nextProvider;
+  }
+
+  // Same lazy-restart treatment as model: persisted immediately, applied to
+  // the running bridge right before the next message (see bridgeConfigKey
+  // check below), never interrupting a turn in flight.
+  if (body.effort !== undefined) {
+    if (body.effort !== null && !VALID_EFFORTS.includes(body.effort)) {
+      return res.status(400).json({ error: `effort must be one of: ${VALID_EFFORTS.join(', ')}` });
+    }
+    patch.effort = body.effort;
   }
 
   const updated = store.updateAgent(agent.id, patch);

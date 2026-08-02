@@ -72,6 +72,10 @@
       <div class="usage-bar" id="usage-week-bar"><div class="usage-bar-fill" id="usage-week-fill"></div></div>
       <div class="usage-bar" id="usage-session-bar"><div class="usage-bar-fill" id="usage-session-fill"></div></div>
       <div class="usage-bar" id="usage-context-bar"><div class="usage-bar-fill" id="usage-context-fill"></div></div>
+      <div id="effort-control">
+        <input type="range" id="effort-slider" min="0" max="4" step="1" value="1" aria-label="Reasoning effort" />
+        <span id="effort-label">Medium</span>
+      </div>
       <button id="clear-btn" type="button" aria-label="Clear conversation">🧹</button>
       <button id="compact-btn" type="button" aria-label="Compact conversation">🗜️</button>
       <button id="todo-btn" type="button" aria-label="Tasks">✅<span id="todo-badge" class="todo-badge" hidden>0</span></button>

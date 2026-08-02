@@ -8,6 +8,8 @@ const chatAgentNameEl = $('#chat-agent-name');
 const backBtn = $('#back-btn');
 const agentOptionsBtn = $('#agent-options-btn');
 const modelSelect = $('#model-select');
+const effortSlider = $('#effort-slider');
+const effortLabel = $('#effort-label');
 const usageSessionBar = $('#usage-session-bar');
 const usageSessionFill = $('#usage-session-fill');
 const usageWeekBar = $('#usage-week-bar');
@@ -237,6 +239,7 @@ async function boot(token) {
   setupSettings(token);
   setupNewAgent(token);
   setupModelPicker(token);
+  setupEffortPicker(token);
   setupTodos(token);
   setupNav();
 }
@@ -397,6 +400,7 @@ async function openAgent(agentId) {
   chatAgentEmojiEl.textContent = entry?.emoji || '🤖';
   chatAgentNameEl.textContent = entry?.name || '';
   syncModelSelect(entry);
+  syncEffortSlider(entry);
   listViewEl.hidden = true;
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
@@ -751,6 +755,59 @@ function syncModelSelect(entry) {
     if (customOpt) customOpt.remove();
     modelSelect.value = model;
   }
+}
+
+// ---- Reasoning effort slider (chat header) — 5 discrete stops matching the
+// CLI's own `--effort` flag values. Same lazy-apply model as the picker
+// below: persisted via PATCH, actually applied to the running bridge right
+// before the next message, so it never interrupts a turn in flight.
+const EFFORT_LEVELS = ['low', 'medium', 'high', 'xhigh', 'max'];
+const EFFORT_LABELS = { low: 'Low', medium: 'Medium', high: 'High', xhigh: 'X-High', max: 'Max' };
+
+function syncEffortSlider(entry) {
+  const effort = entry?.effort || 'medium';
+  const idx = EFFORT_LEVELS.indexOf(effort);
+  effortSlider.value = String(idx === -1 ? 1 : idx);
+  effortLabel.textContent = EFFORT_LABELS[effort] || 'Medium';
+}
+
+function setupEffortPicker(token) {
+  // Live label update while dragging; the native step="1" already snaps the
+  // thumb itself, this just keeps the text in sync as it moves.
+  effortSlider.addEventListener('input', () => {
+    const level = EFFORT_LEVELS[Number(effortSlider.value)];
+    effortLabel.textContent = EFFORT_LABELS[level];
+  });
+
+  // Fires once on release/commit (not per-drag-frame) — that's when we
+  // actually persist the choice.
+  effortSlider.addEventListener('change', () => {
+    const agentId = currentAgentId;
+    if (!agentId) return;
+    const previousEntry = roster.get(agentId);
+    const level = EFFORT_LEVELS[Number(effortSlider.value)];
+
+    (async () => {
+      try {
+        const res = await fetch(`/api/agents/${encodeURIComponent(agentId)}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ effort: level }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          syncEffortSlider(previousEntry);
+          setStatus(data.error || 'Could not switch effort', false);
+          return;
+        }
+        roster.set(data.agent.id, data.agent);
+        syncEffortSlider(data.agent);
+      } catch {
+        syncEffortSlider(previousEntry);
+        setStatus('offline — try again', false);
+      }
+    })();
+  });
 }
 
 // ---- Quick model switch (chat header) — separate from the full edit form
@@ -1253,6 +1310,7 @@ function handleServerEvent(msg) {
       if (!listViewEl.hidden) renderAgentList();
       if (currentAgentId === msg.agent.id) {
         syncModelSelect(msg.agent);
+        syncEffortSlider(msg.agent);
         // A model switch restarts this agent's bridge, which discards its
         // old context reading (a different model has a different context
         // window, so the old percentage would just be wrong) — reflect that
