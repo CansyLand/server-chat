@@ -759,7 +759,7 @@ header .title { font-weight: 600; }
 
 .msg { display: flex; flex-direction: column; max-width: 86%; min-width: 0; }
 .msg.user { align-self: flex-end; align-items: flex-end; }
-.msg.assistant { align-self: flex-start; align-items: flex-start; }
+.msg.assistant { align-self: stretch; align-items: flex-start; max-width: 100%; }
 
 .bubble {
   padding: 10px 14px;
@@ -770,8 +770,13 @@ header .title { font-weight: 600; }
   max-width: 100%;
 }
 .msg.user .bubble { background: var(--bubble-user); color: white; border-bottom-right-radius: 4px; }
-.msg.assistant .bubble { background: var(--bubble-assistant); border-bottom-left-radius: 4px; }
+/* Assistant replies are plain text, not a bubble — a boxed reply reads oddly
+   once it's the only thing on its side of the screen, and the box wastes
+   horizontal space the text could use. User messages keep the bubble since
+   they sit against the opposite edge and benefit from the visual boundary. */
+.msg.assistant .bubble { background: none; padding: 0; }
 .bubble.error { border: 1px solid var(--error); }
+.msg.assistant .bubble.error { padding: 10px 14px; }
 
 .msg.live .bubble { opacity: 0.85; }
 
