@@ -47,6 +47,7 @@
       <span class="title">Agents</span>
       <span id="status">connecting…</span>
       <button id="notify-btn" hidden type="button">Enable notifications</button>
+      <button id="new-room-btn" type="button" aria-label="New group chat">👥</button>
       <button id="new-agent-btn" type="button" aria-label="New agent">+</button>
       <button id="settings-btn" type="button" aria-label="Settings">⚙</button>
     </header>
@@ -67,7 +68,15 @@
         <option value="__openrouter__">OpenRouter…</option>
       </select>
       <button id="agent-options-btn" type="button" aria-label="Agent options">⋯</button>
+      <button id="room-options-btn" hidden type="button" aria-label="Group chat options">⋯</button>
     </header>
+    <!-- Room mode only: who is in this room, who is mid-turn, and the one
+         button that stops the whole room at once. Replaces #usage-bars, which
+         is entirely agent-scoped (model, effort, context, todos). -->
+    <div id="room-bar" hidden>
+      <div id="room-members"></div>
+      <button id="room-stop-btn" type="button" aria-label="Stop everyone in this room">■</button>
+    </div>
     <div id="usage-bars">
       <div class="usage-bar" id="usage-week-bar"><div class="usage-bar-fill" id="usage-week-fill"></div></div>
       <div class="usage-bar" id="usage-session-bar"><div class="usage-bar-fill" id="usage-session-fill"></div></div>
@@ -122,6 +131,10 @@
       <label class="field-label" for="new-agent-workdir">Working directory</label>
       <input id="new-agent-workdir" type="text" placeholder="/home/cansy" autocomplete="off" />
 
+      <label class="field-label" for="new-agent-blurb">Expertise <span class="field-optional">(optional)</span></label>
+      <input id="new-agent-blurb" type="text" maxlength="200" placeholder="e.g. Frontend and UI of the chat app" autocomplete="off" />
+      <p class="field-hint">One line, shown to the <em>other</em> agents so they know when to @mention this one in a group chat.</p>
+
       <label class="field-label" for="new-agent-persona">Persona <span class="field-optional">(optional)</span></label>
       <textarea id="new-agent-persona" rows="3" placeholder="e.g. You are an art specialist. Only discuss art, painting, design, and art history."></textarea>
       <p class="field-hint" id="new-agent-persona-counter"></p>
@@ -131,6 +144,34 @@
       <button type="submit" id="new-agent-submit">Create agent</button>
       <button type="button" id="new-agent-cancel">Cancel</button>
       <button type="button" id="agent-delete-btn" hidden>Delete agent</button>
+    </form>
+  </div>
+</div>
+
+<div id="new-room-modal" class="modal-overlay" hidden>
+  <div class="settings-sheet">
+    <h2 class="sheet-title" id="room-form-title">New group chat</h2>
+    <form id="new-room-form">
+      <input type="hidden" id="room-form-id" value="" />
+      <label class="field-label" for="new-room-name">Name</label>
+      <input id="new-room-name" type="text" maxlength="60" placeholder="e.g. auth-refactor" autocomplete="off" required />
+
+      <label class="field-label">Avatar</label>
+      <div class="emoji-picker" id="room-emoji-picker"></div>
+
+      <label class="field-label" for="new-room-charter">Purpose <span class="field-optional">(optional)</span></label>
+      <textarea id="new-room-charter" rows="2" maxlength="2000" placeholder="e.g. Fix the token refresh bug. Don't touch anything outside server/auth.js."></textarea>
+      <p class="field-hint">Sent to every member with every message — the place to state what's in scope and what's off-limits.</p>
+
+      <label class="field-label">Members</label>
+      <div id="room-member-picker"></div>
+      <p class="field-hint">Invite only the specialists this problem needs. Everyone else is noise — and cost.</p>
+
+      <p id="new-room-error" class="error-text" hidden></p>
+
+      <button type="submit" id="new-room-submit">Create group chat</button>
+      <button type="button" id="new-room-cancel">Cancel</button>
+      <button type="button" id="room-delete-btn" hidden>Delete group chat</button>
     </form>
   </div>
 </div>

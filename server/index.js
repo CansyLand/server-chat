@@ -24,6 +24,10 @@ const VALID_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 // which shows a live counter — keep the two in sync. ~16k chars is ~4k tokens,
 // which is a reasonable ceiling for a detailed project-specific persona.
 const PERSONA_MAX_CHARS = 16000;
+// The peer-facing one-liner. Short on purpose: it's repeated once per member
+// in every group-chat delivery header, so a paragraph here is a paragraph
+// every other agent re-reads on every single message.
+const BLURB_MAX_CHARS = 200;
 const VALID_PROVIDERS = ['anthropic', 'openrouter'];
 
 // Free-tier/alt-model routing: OpenRouter exposes an Anthropic-Messages-API
@@ -223,7 +227,8 @@ function anyClientViewing(agentId) {
 }
 
 function totalUnread() {
-  return store.listAgents().reduce((sum, a) => sum + store.getUnreadCount(a.id), 0);
+  return store.listAgents().reduce((sum, a) => sum + store.getUnreadCount(a.id), 0)
+    + store.listRooms().reduce((sum, r) => sum + store.getRoomUnread(r.id), 0);
 }
 
 function toolResultPreview(content) {
@@ -254,6 +259,7 @@ function rosterEntry(agent) {
     color: agent.color,
     workdir: agent.workdir,
     systemPrompt: agent.systemPrompt,
+    blurb: agent.blurb || null,
     model: agent.model || 'sonnet',
     provider: agent.provider || 'anthropic',
     effort: agent.effort || 'medium',
@@ -308,7 +314,15 @@ function buildRoster() {
 
 function broadcastRosterEntry(agentId) {
   const agent = store.getAgent(agentId);
-  if (agent) broadcast({ type: 'roster_entry', agent: rosterEntry(agent) });
+  if (!agent) return;
+  broadcast({ type: 'roster_entry', agent: rosterEntry(agent) });
+  // A room's "who is replying right now" strip is derived from its members'
+  // runtimes, so every change to an agent's working state is also a change to
+  // every room it belongs to. Without this the chips latch on at the start of
+  // a discussion and never clear.
+  for (const room of store.listRooms()) {
+    if (room.memberIds.includes(agentId)) broadcast({ type: 'room_entry', room: roomEntry(room) });
+  }
 }
 
 // Every agent gets this, regardless of persona — otherwise there's no way
@@ -319,13 +333,41 @@ function broadcastRosterEntry(agentId) {
 const AGENTS_DOC_FILE = path.join(process.cwd(), 'AGENTS.md');
 const TOKEN_FILE_PATH = path.join(process.cwd(), 'data', 'device-token.secret');
 
+// The other agents on this install, as a one-line-each directory. Without it
+// an agent has no way to know who else exists, so it can't sensibly @mention
+// anyone in a group chat. Deliberately the short `blurb`, never the full
+// persona: personas run to thousands of chars and are that agent's own
+// private instructions, not a description meant for its peers.
+function buildPeerDirectory(agent) {
+  const peers = store.listAgents().filter((a) => a.id !== agent.id);
+  if (!peers.length) return null;
+  const lines = peers.map((a) => `- ${a.emoji || '🤖'} ${a.name} (id: ${a.id})${a.blurb ? ` — ${a.blurb}` : ''}`);
+  return `Other agents in this app you can be put in a group chat with:\n${lines.join('\n')}`;
+}
+
+// Only the rooms this agent is actually in. A room it isn't a member of is
+// none of its business, and listing every room would be exactly the "one big
+// group chat is all distraction" problem in system-prompt form.
+function buildRoomDirectory(agent) {
+  const rooms = store.listRooms().filter((r) => r.memberIds.includes(agent.id));
+  if (!rooms.length) return null;
+  const lines = rooms.map((r) => `- #${r.name} (id: ${r.id})${r.charter ? ` — ${r.charter}` : ''}`);
+  return `Group chats you are a member of:\n${lines.join('\n')}\n\nMessages from these arrive in this conversation prefixed with [Group chat #name]. Whatever you reply to one is posted back into that room automatically — you do not need to call any API to speak. @mention a member by name to hand them the next turn.`;
+}
+
 function buildFullSystemPrompt(agent) {
   // Lives in the repo (AGENTS.md), not personal memory — so it ships with
   // every install automatically instead of needing to be hand-copied into
   // each account's own memory system. Port/token path are computed per
   // install, never hardcoded, so nothing here needs editing on a new deploy.
-  const selfContext = `[xqlytskg-chat context: you are agent "${agent.name}" (id: ${agent.id}) inside this chat app. Base URL: http://127.0.0.1:${PORT} — auth token is the contents of ${TOKEN_FILE_PATH}. This app's own extra features (task list, etc.) are documented in ${AGENTS_DOC_FILE} — read it when you need the details.]`;
-  return agent.systemPrompt ? `${selfContext}\n\n${agent.systemPrompt}` : selfContext;
+  const selfContext = `[xqlytskg-chat context: you are agent "${agent.name}" (id: ${agent.id}) inside this chat app. Base URL: http://127.0.0.1:${PORT} — auth token is the contents of ${TOKEN_FILE_PATH}. This app's own extra features (task list, group chats, etc.) are documented in ${AGENTS_DOC_FILE} — read it when you need the details.]`;
+  // Peer/room directories are baked in at spawn time, so a roster change only
+  // reaches an agent when its bridge next restarts. That's why every room
+  // delivery also carries its own member list inline — that copy is always
+  // current, and is the one an agent should trust if the two disagree.
+  return [selfContext, buildPeerDirectory(agent), buildRoomDirectory(agent), agent.systemPrompt]
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function startAgentBridge(agent) {
@@ -341,6 +383,13 @@ function startAgentBridge(agent) {
   const runtime = {
     bridge, currentTurn: null, liveDeltaBuffer: '', turnStartedAt: null, activeToolName: null,
     interrupted: false, waitingUntil: null, lastUserText: null, retryTimeoutId: null, slashCommands: [],
+    // Inbound messages that arrived while this agent was mid-turn. Without
+    // this they'd go straight down the CLI's stdin on top of a turn already
+    // in flight — fine for one human typing, not fine once several agents can
+    // address the same agent at once.
+    queue: [],
+    replyTo: null,   // roomId whose delivery started the in-flight turn, if any
+    replyHops: 0,    // how far down an agent→agent chain that delivery already was
     usageProbe: 0, // counter: number of pending probe commands (usage, context, etc.)
     compacting: null, // { startedAt, tokensBefore } while a /compact is in flight
     compactedAt: null, // carries the finished compaction until the after-probe lands
@@ -370,6 +419,10 @@ function startAgentBridge(agent) {
     store.setAgentSessionId(agent.id, sessionId);
     runtime.slashCommands = slashCommands || [];
     broadcastRosterEntry(agent.id);
+    // A room message that arrived while this process was starting (or
+    // restarting after a crash) has been sitting in the queue with nothing to
+    // send it — this is the point at which stdin exists again.
+    flushQueue(agent.id);
   });
 
   bridge.on('delta', (text) => {
@@ -513,6 +566,7 @@ function startAgentBridge(agent) {
       delete runtime._probeUsage;
       delete runtime._probeContext;
       broadcastRosterEntry(agent.id); // clears the brief working-indicator state
+      flushQueue(agent.id); // a room message may have landed behind this probe
       return;
     }
 
@@ -559,6 +613,14 @@ function startAgentBridge(agent) {
     // marker below (once the after-probe lands) be the only visible trace.
     // A non-empty reply (error text, interrupted-turn placeholder) still gets
     // shown normally, same as /compact.
+    // This turn was started by a group-chat delivery, so the reply belongs to
+    // that room rather than to the DM. Cleared before the await below so a
+    // reply that itself triggers another delivery can't inherit this one.
+    const replyTo = runtime.replyTo;
+    const replyHops = runtime.replyHops || 0;
+    runtime.replyTo = null;
+    runtime.replyHops = 0;
+
     if (!clearing || finalText.trim()) {
       const message = {
         id: randomUUID(),
@@ -575,8 +637,32 @@ function startAgentBridge(agent) {
         thinking: runtime.liveThinkingText || '',
         thinkingTokens: runtime.liveThinkingTokens || null,
       };
-      store.addMessage(agent.id, message);
-      broadcast({ type: 'assistant_message', agentId: agent.id, message });
+      if (replyTo && store.getRoom(replyTo) && !isError && !wasInterrupted && finalText.trim()) {
+        // Posted to the room, not to the DM — with a compact marker left in the
+        // DM so this agent's own chat still shows that it was busy and where
+        // the work went, instead of an unexplained gap in its history.
+        const room = store.getRoom(replyTo);
+        const marker = {
+          id: randomUUID(),
+          role: 'room-ref',
+          text: `Replied in #${room.name}`,
+          roomId: room.id,
+          roomName: room.name,
+          roomEmoji: room.emoji,
+          preview: finalText.slice(0, 140),
+          ts: Date.now(),
+        };
+        store.addMessage(agent.id, marker);
+        broadcast({ type: 'assistant_message', agentId: agent.id, message: marker });
+        const posted = await postRoomMessage(room, { agentId: agent.id, text: finalText, hops: replyHops });
+        // Marked read only once its own reply exists and has a seq — that
+        // reply is already in this agent's session, and without this its next
+        // delivery would quote its own words back to it as "new in this room".
+        if (posted) store.setRoomSeen(room.id, agent.id, posted.seq);
+      } else {
+        store.addMessage(agent.id, message);
+        broadcast({ type: 'assistant_message', agentId: agent.id, message });
+      }
     }
 
     // A finished /compact gets an explicit end-of-compaction marker rather
@@ -595,6 +681,9 @@ function startAgentBridge(agent) {
     runtime.turnStartedAt = null;
     runtime.activeToolName = null;
     broadcastRosterEntry(agent.id);
+    // Anything that arrived while this turn was running goes now, before
+    // refreshUsage below can claim the newly-idle bridge for a probe.
+    flushQueue(agent.id);
 
     if (compacting) {
       runtime.compactedAt = {
@@ -614,7 +703,9 @@ function startAgentBridge(agent) {
     }
     refreshUsage(agent.id); // a real turn just spent tokens — the numbers may have moved
 
-    if (!wasInterrupted && !anyClientViewing(agent.id)) {
+    // A reply that went to a room already got its own notification decision in
+    // postRoomMessage — pushing again here would double-notify for one message.
+    if (!wasInterrupted && !replyTo && !anyClientViewing(agent.id)) {
       store.incrementUnread(agent.id);
       const current = store.getAgent(agent.id) || agent;
       await sendPush({
@@ -643,6 +734,11 @@ function startAgentBridge(agent) {
     // Same reasoning, for a /clear that died mid-flight.
     runtime.clearing = null;
     runtime.clearedAt = null;
+    // The turn that died was the one owing a room a reply. Nothing will ever
+    // produce that reply now, so drop the routing rather than letting the next
+    // unrelated DM answer get posted into the room in its place.
+    runtime.replyTo = null;
+    runtime.replyHops = 0;
     broadcast({ type: 'compact_done', agentId: agent.id, crashed: true });
     broadcast({ type: 'clear_done', agentId: agent.id, crashed: true });
     broadcast({ type: 'system', agentId: agent.id, text: `${agent.name}: process restarting…` });
@@ -680,6 +776,235 @@ function stopAgentBridge(agentId) {
   if (!runtime) return;
   runtime.bridge.stop();
   runtimes.delete(agentId);
+}
+
+// ---- Group chats ----------------------------------------------------------
+// A room has no process of its own. Every member keeps the single session it
+// already had, so an agent in a room still remembers what it did in its DM and
+// vice versa — the whole reason agents step on each other's work is context
+// living in separate places, and a second session per room would just recreate
+// that one level down.
+//
+// Delivery is addressed, never broadcast: only @mentioned members are handed a
+// turn. Everyone else has the message folded into their *next* turn as
+// catch-up (see store.getRoomSeen), so the room stays in sync without N agents
+// waking up and replying to every line.
+
+// High enough that a genuine back-and-forth runs to its natural end — the
+// point of a room is that agents work a problem out between themselves, which
+// takes more than a couple of exchanges. This is a runaway guard against two
+// agents thanking each other forever, not a discussion budget.
+const HOP_LIMIT = 12;
+
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// Matches @Name / @NameNoSpaces / @id against the room's actual membership.
+// Longest name first, so "@NEO" inside a room that also has a "NEO - Cyber
+// Security" resolves to the longer, more specific one rather than whichever
+// happened to be stored first.
+function parseMentions(text, members) {
+  const found = [];
+  for (const m of [...members].sort((a, b) => b.name.length - a.name.length)) {
+    for (const variant of [m.name, m.name.replace(/\s+/g, ''), m.id]) {
+      if (new RegExp('@' + escapeRe(variant) + '(?![\\w-])', 'i').test(text)) {
+        found.push(m.id);
+        break;
+      }
+    }
+  }
+  return [...new Set(found)];
+}
+
+function roomMemberAgents(room) {
+  return room.memberIds.map((id) => store.getAgent(id)).filter(Boolean);
+}
+
+function roomSenderName(msg) {
+  if (!msg.agentId) return 'Human';
+  return store.getAgent(msg.agentId)?.name || 'a removed agent';
+}
+
+// The text an addressed agent actually receives. Carries the member list and
+// charter inline on every delivery rather than relying on the system prompt
+// copy, which is frozen at spawn time and goes stale the moment membership
+// changes.
+function buildRoomDelivery(room, agent, catchUp) {
+  const members = roomMemberAgents(room)
+    .map((a) => `- ${a.emoji || '🤖'} ${a.name}${a.id === agent.id ? ' (you)' : ''}${a.blurb ? ` — ${a.blurb}` : ''}`)
+    .join('\n');
+  const transcript = catchUp
+    .map((m) => (m.role === 'system' ? `[${m.text}]` : `${roomSenderName(m)}: ${m.text}`))
+    .join('\n\n');
+
+  return [
+    `[Group chat #${room.name}]`,
+    room.charter ? `Purpose of this room: ${room.charter}` : null,
+    `Members:\n${members}`,
+    `--- new in this room since you last spoke ---\n${transcript}\n--- end ---`,
+    `You were @mentioned. Your next reply is posted into #${room.name} automatically — write it as a message to the room, not as a report to one person, and keep it short enough for others to read quickly. To hand someone the next turn, @mention them by name; if the discussion has reached its end, reply without mentioning anyone.`,
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
+
+function anyClientViewingRoom(roomId) {
+  for (const ws of wss.clients) {
+    if (ws.readyState === ws.OPEN && ws.isVisible && ws.openRoomId === roomId) return true;
+  }
+  return false;
+}
+
+function roomEntry(room) {
+  const messages = store.getRoomMessages(room.id);
+  const last = messages[messages.length - 1] || null;
+  const members = roomMemberAgents(room);
+  return {
+    kind: 'room',
+    id: room.id,
+    name: room.name,
+    emoji: room.emoji,
+    color: room.color,
+    charter: room.charter,
+    memberIds: room.memberIds,
+    members: members.map((a) => ({
+      id: a.id, name: a.name, emoji: a.emoji, color: a.color, blurb: a.blurb || null,
+    })),
+    unreadCount: store.getRoomUnread(room.id),
+    lastMessage: last ? { text: last.text, ts: last.ts, sender: roomSenderName(last) } : null,
+    // Who in this room is mid-turn right now — drives the "3 agents thinking"
+    // cue, which is the only way to tell a live discussion from a stalled one.
+    busyMemberIds: members.filter((a) => isReallyWorking(runtimes.get(a.id))).map((a) => a.id),
+    // Members carrying room context they haven't had a turn on yet.
+    pendingMemberIds: members
+      .filter((a) => store.getRoomSeen(room.id, a.id) < (last?.seq || 0))
+      .map((a) => a.id),
+  };
+}
+
+function buildRooms() {
+  return store.listRooms().map(roomEntry);
+}
+
+function broadcastRoomEntry(roomId) {
+  const room = store.getRoom(roomId);
+  if (room) broadcast({ type: 'room_entry', room: roomEntry(room) });
+}
+
+// Wakes a sleeping agent the same way a human message does — a --resume, no
+// different from any other first message after an idle period.
+function ensureRuntime(agentId) {
+  let runtime = runtimes.get(agentId);
+  if (!runtime) {
+    const agent = store.getAgent(agentId);
+    if (!agent) return null;
+    runtime = startAgentBridge(agent);
+    broadcastRosterEntry(agentId);
+  }
+  return runtime;
+}
+
+function enqueueForAgent(agentId, item) {
+  const runtime = ensureRuntime(agentId);
+  if (!runtime) return;
+  runtime.queue.push(item);
+  flushQueue(agentId);
+}
+
+// Sends the next queued item, coalescing every consecutive item bound for the
+// same room into one delivery: three things said to an agent while it was busy
+// should cost it one turn that reads all three, not three turns that each
+// answer a message the others already moved past.
+function flushQueue(agentId) {
+  const runtime = runtimes.get(agentId);
+  if (!runtime || runtime.turnStartedAt || !runtime.queue.length) return;
+
+  const { replyTo } = runtime.queue[0];
+  const group = [];
+  while (runtime.queue.length && runtime.queue[0].replyTo === replyTo) {
+    group.push(runtime.queue.shift());
+  }
+  const text = group.map((g) => g.text).join('\n\n');
+
+  try {
+    runtime.bridge.send(text);
+    runtime.lastUserText = text;
+    runtime.replyTo = replyTo;
+    runtime.replyHops = Math.max(...group.map((g) => g.hops || 0));
+    runtime.turnStartedAt = Date.now();
+    runtime.activeToolName = null;
+    broadcast({ type: 'turn_started', agentId });
+    broadcastRosterEntry(agentId);
+  } catch (err) {
+    broadcast({ type: 'system', agentId, text: `group-chat delivery failed: ${err.message}` });
+  }
+}
+
+// Brings one member up to date and gives it the turn.
+function deliverRoomTo(room, agentId, hops) {
+  const agent = store.getAgent(agentId);
+  if (!agent) return;
+  const all = store.getRoomMessages(room.id);
+  const seen = store.getRoomSeen(room.id, agentId);
+  const catchUp = all.filter((m) => m.seq > seen);
+  // Already caught up means another delivery is carrying this same content and
+  // that agent's turn on it is already queued — a second identical delivery
+  // would just make it answer twice.
+  if (!catchUp.length) return;
+  store.setRoomSeen(room.id, agentId, all[all.length - 1].seq);
+  enqueueForAgent(agentId, { text: buildRoomDelivery(room, agent, catchUp), replyTo: room.id, hops });
+}
+
+// The single path every room message goes through, whoever sent it: the human
+// from the composer, an agent's auto-routed reply, or an agent POSTing to the
+// API directly.
+async function postRoomMessage(room, { agentId = null, text, hops = 0 }) {
+  const message = store.addRoomMessage(room.id, {
+    id: randomUUID(),
+    role: agentId ? 'agent' : 'user',
+    agentId,
+    text,
+    ts: Date.now(),
+    hops,
+  });
+  broadcast({ type: 'room_message', roomId: room.id, message });
+
+  const members = roomMemberAgents(room);
+  let mentions = parseMentions(text, members).filter((id) => id !== agentId);
+
+  if (hops >= HOP_LIMIT && mentions.length) {
+    mentions = [];
+    const note = store.addRoomMessage(room.id, {
+      id: randomUUID(),
+      role: 'system',
+      agentId: null,
+      text: `Chain limit reached (${HOP_LIMIT} hops without you) — mentions above were not delivered. @mention someone to pick it back up.`,
+      ts: Date.now(),
+      hops: 0,
+    });
+    broadcast({ type: 'room_message', roomId: room.id, message: note });
+  }
+
+  for (const id of mentions) deliverRoomTo(room, id, hops + 1);
+  broadcastRoomEntry(room.id);
+
+  // Notify only when an agent said something that hands the thread back to
+  // you — i.e. it mentioned nobody, so the discussion has come to rest. A push
+  // per message would fire on every line of an agent-to-agent exchange, which
+  // is exactly the noise this feature exists to save you from.
+  if (agentId && !mentions.length && !anyClientViewingRoom(room.id)) {
+    store.incrementRoomUnread(room.id);
+    broadcastRoomEntry(room.id);
+    const sender = store.getAgent(agentId);
+    await sendPush({
+      title: `${room.emoji || '👥'} ${room.name}`,
+      body: `${sender?.name || 'Agent'}: ${text.slice(0, 160)}`,
+      unread: totalUnread(),
+      roomId: room.id,
+    });
+  }
+  return message;
 }
 
 // Schedules the automatic resend of an agent's last message once its
@@ -743,6 +1068,7 @@ setInterval(() => {
   const now = Date.now();
   for (const [agentId, runtime] of runtimes) {
     if (runtime.turnStartedAt) continue; // never sleep mid-turn
+    if (runtime.queue.length) continue; // ...nor holding an undelivered room message
     if (now - lastActivityTs(agentId) > IDLE_SLEEP_MS) {
       stopAgentBridge(agentId);
       broadcastRosterEntry(agentId);
@@ -773,6 +1099,7 @@ function refreshUsage(viewedAgentId) {
   for (const agentId of candidates) {
     const runtime = runtimes.get(agentId);
     if (!runtime || runtime.turnStartedAt) continue; // busy with something real
+    if (runtime.queue.length) continue; // about to take a real turn — don't delay it behind a probe
     runtime.usageProbe = 2;
     try {
       runtime.bridge.send('/usage');
@@ -791,7 +1118,87 @@ function refreshUsage(viewedAgentId) {
 // just the same numbers again.
 
 app.get('/api/roster', requireAuth, (req, res) => {
-  res.json({ agents: buildRoster(), vapidPublicKey: VAPID_PUBLIC_KEY, usage: latestUsage });
+  res.json({ agents: buildRoster(), rooms: buildRooms(), vapidPublicKey: VAPID_PUBLIC_KEY, usage: latestUsage });
+});
+
+// ---- Room API. Agents use these to see who they're in a room with and to
+// start a thread of their own; replying to a delivery needs none of this,
+// since that reply is routed back automatically. ----
+
+app.get('/api/rooms', requireAuth, (req, res) => {
+  res.json({ rooms: buildRooms() });
+});
+
+app.get('/api/rooms/:id', requireAuth, (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  res.json({ room: roomEntry(room) });
+});
+
+app.get('/api/rooms/:id/messages', requireAuth, (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
+  const all = store.getRoomMessages(room.id);
+  const messages = all.slice(-limit).map((m) => ({ ...m, sender: roomSenderName(m) }));
+  res.json({ messages, hasMore: all.length > messages.length, totalCount: all.length });
+});
+
+app.post('/api/rooms/:id/messages', requireAuth, async (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  const text = typeof req.body.text === 'string' ? req.body.text.trim() : '';
+  if (!text) return res.status(400).json({ error: 'text required' });
+
+  // Omitting agentId posts as the human — which is what a script or a curl
+  // from outside any agent should look like.
+  const agentId = typeof req.body.agentId === 'string' ? req.body.agentId : null;
+  if (agentId && !room.memberIds.includes(agentId)) {
+    return res.status(403).json({ error: 'not a member of this room' });
+  }
+  const message = await postRoomMessage(room, { agentId, text, hops: 0 });
+  res.json({ message });
+});
+
+app.post('/api/rooms', requireAuth, (req, res) => {
+  const { name, emoji, color, charter, memberIds } = req.body || {};
+  if (typeof name !== 'string' || !name.trim()) return res.status(400).json({ error: 'name required' });
+  const ids = Array.isArray(memberIds) ? memberIds.filter((id) => store.getAgent(id)) : [];
+  const room = store.createRoom({
+    name: name.trim().slice(0, 60),
+    emoji: typeof emoji === 'string' && emoji.trim() ? emoji.trim().slice(0, 8) : '👥',
+    color: typeof color === 'string' && color ? color : '#7c9cff',
+    charter: typeof charter === 'string' && charter.trim() ? charter.trim().slice(0, 2000) : null,
+    memberIds: ids,
+  });
+  // Membership is part of every member's system prompt, so a running bridge
+  // holds a stale copy until it restarts. Each delivery carries the current
+  // list inline, so this is a nicety rather than a correctness fix.
+  broadcastRoomEntry(room.id);
+  res.json({ room: roomEntry(room) });
+});
+
+app.patch('/api/rooms/:id', requireAuth, (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  const body = req.body || {};
+  const patch = {};
+  if (typeof body.name === 'string' && body.name.trim()) patch.name = body.name.trim().slice(0, 60);
+  if (typeof body.emoji === 'string' && body.emoji.trim()) patch.emoji = body.emoji.trim().slice(0, 8);
+  if (typeof body.color === 'string' && body.color) patch.color = body.color;
+  if (typeof body.charter === 'string') patch.charter = body.charter.trim() ? body.charter.trim().slice(0, 2000) : null;
+  if (Array.isArray(body.memberIds)) patch.memberIds = body.memberIds.filter((id) => store.getAgent(id));
+  const updated = store.updateRoom(room.id, patch);
+  broadcastRoomEntry(room.id);
+  res.json({ room: roomEntry(updated) });
+});
+
+app.delete('/api/rooms/:id', requireAuth, (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  store.removeRoom(room.id);
+  broadcast({ type: 'room_removed', roomId: room.id });
+  res.json({ ok: true });
 });
 
 app.get('/api/agents/:id/messages', requireAuth, (req, res) => {
@@ -884,7 +1291,7 @@ app.delete('/api/agents/:id/todos/:todoId', requireAuth, (req, res) => {
 });
 
 app.post('/api/agents', requireAuth, (req, res) => {
-  const { name, emoji, color, workdir, systemPrompt, model, provider } = req.body || {};
+  const { name, emoji, color, workdir, systemPrompt, model, provider, blurb } = req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'name required' });
   }
@@ -919,6 +1326,7 @@ app.post('/api/agents', requireAuth, (req, res) => {
     color: typeof color === 'string' && color ? color : '#7c9cff',
     workdir: dir,
     systemPrompt: typeof systemPrompt === 'string' && systemPrompt.trim() ? systemPrompt.trim().slice(0, PERSONA_MAX_CHARS) : null,
+    blurb: typeof blurb === 'string' && blurb.trim() ? blurb.trim().slice(0, BLURB_MAX_CHARS) : null,
     model: isOpenRouter ? model.trim().slice(0, 200) : (VALID_MODELS.includes(model) ? model : null),
     provider: isOpenRouter ? 'openrouter' : null,
   });
@@ -958,6 +1366,12 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
       patch.systemPrompt = sp;
       bridgeParamsChanged = true;
     }
+  }
+  // Not a bridge restart: the blurb describes this agent to *other* agents, so
+  // it lands in their prompts, not this one's — and every room delivery
+  // rebuilds the member list from the store anyway.
+  if (typeof body.blurb === 'string') {
+    patch.blurb = body.blurb.trim() ? body.blurb.trim().slice(0, BLURB_MAX_CHARS) : null;
   }
   // Model/provider are intentionally NOT restarted here, unlike workdir/
   // systemPrompt — picking a new model shouldn't kill whatever that agent's
@@ -1008,9 +1422,13 @@ app.patch('/api/agents/:id', requireAuth, (req, res) => {
 app.delete('/api/agents/:id', requireAuth, (req, res) => {
   const agent = store.getAgent(req.params.id);
   if (!agent) return res.status(404).json({ error: 'no such agent' });
+  // Which rooms it belonged to has to be read before the delete — removeAgent
+  // strips it from their membership as part of the same call.
+  const affectedRooms = store.listRooms().filter((r) => r.memberIds.includes(agent.id)).map((r) => r.id);
   stopAgentBridge(agent.id);
   store.removeAgent(agent.id);
   broadcast({ type: 'agent_removed', agentId: agent.id });
+  for (const roomId of affectedRooms) broadcastRoomEntry(roomId);
   res.json({ ok: true });
 });
 
@@ -1050,8 +1468,9 @@ wss.on('connection', (ws, req) => {
 
   ws.isVisible = true; // assume foregrounded until told otherwise
   ws.openAgentId = null; // which agent's chat (if any) is the open screen
+  ws.openRoomId = null; // ...or which room's, since both use the same screen
 
-  ws.send(JSON.stringify({ type: 'hello', agents: buildRoster(), usage: latestUsage }));
+  ws.send(JSON.stringify({ type: 'hello', agents: buildRoster(), rooms: buildRooms(), usage: latestUsage }));
   refreshUsage(ws.openAgentId); // a fresh connection means the app was just (re)opened — worth a check
 
   ws.on('message', (raw) => {
@@ -1137,10 +1556,43 @@ wss.on('connection', (ws, req) => {
         runtime.interrupted = true;
         runtime.bridge.interrupt();
       }
+    } else if (msg.type === 'room_message' && typeof msg.roomId === 'string' && typeof msg.text === 'string' && msg.text.trim()) {
+      const room = store.getRoom(msg.roomId);
+      if (!room) return;
+      // hops 0: anything you say resets the chain, which is what makes the hop
+      // limit a guard against agents looping rather than a cap on how long a
+      // conversation you're part of can run.
+      postRoomMessage(room, { agentId: null, text: msg.text.trim(), hops: 0 });
+    } else if (msg.type === 'room_stop' && typeof msg.roomId === 'string') {
+      // One button for the whole room: in a live cascade the useful action is
+      // "everyone stop", not hunting down which three members are mid-turn.
+      const room = store.getRoom(msg.roomId);
+      if (!room) return;
+      for (const agent of roomMemberAgents(room)) {
+        const runtime = runtimes.get(agent.id);
+        if (!runtime) continue;
+        runtime.queue = [];
+        if (runtime.turnStartedAt && !runtime.usageProbe) {
+          runtime.interrupted = true;
+          runtime.bridge.interrupt();
+        }
+      }
+      broadcastRoomEntry(room.id);
+    } else if (msg.type === 'room_view') {
+      // Rooms and agent DMs share one screen, so opening either closes the
+      // other — leaving both set would suppress notifications for a chat that
+      // isn't actually on screen any more.
+      ws.openRoomId = typeof msg.roomId === 'string' ? msg.roomId : null;
+      if (ws.openRoomId) ws.openAgentId = null;
+      if (ws.openRoomId && ws.isVisible) {
+        store.clearRoomUnread(ws.openRoomId);
+        broadcastRoomEntry(ws.openRoomId);
+      }
     } else if (msg.type === 'view') {
       // Which agent's chat (if any) is currently the open screen on this
       // connection — drives per-agent unread clearing and push suppression.
       ws.openAgentId = typeof msg.agentId === 'string' ? msg.agentId : null;
+      if (ws.openAgentId) ws.openRoomId = null;
       if (ws.openAgentId && ws.isVisible) {
         store.clearUnread(ws.openAgentId);
         broadcastRosterEntry(ws.openAgentId);
@@ -1158,6 +1610,10 @@ wss.on('connection', (ws, req) => {
       if (ws.isVisible && ws.openAgentId) {
         store.clearUnread(ws.openAgentId);
         broadcastRosterEntry(ws.openAgentId);
+      }
+      if (ws.isVisible && ws.openRoomId) {
+        store.clearRoomUnread(ws.openRoomId);
+        broadcastRoomEntry(ws.openRoomId);
       }
     } else if (msg.type === 'read' && ws.openAgentId) {
       store.clearUnread(ws.openAgentId);

@@ -61,6 +61,25 @@ const settingsUpdateBtn = $('#settings-update-btn');
 const settingsDeployBtn = $('#settings-deploy-btn');
 const settingsRestartBtn = $('#settings-restart-btn');
 const settingsCloseBtn = $('#settings-close-btn');
+const newAgentBlurbInput = $('#new-agent-blurb');
+const newRoomBtn = $('#new-room-btn');
+const newRoomModal = $('#new-room-modal');
+const newRoomForm = $('#new-room-form');
+const roomFormTitleEl = $('#room-form-title');
+const roomFormIdInput = $('#room-form-id');
+const newRoomNameInput = $('#new-room-name');
+const newRoomCharterInput = $('#new-room-charter');
+const newRoomErrorEl = $('#new-room-error');
+const newRoomSubmitBtn = $('#new-room-submit');
+const newRoomCancelBtn = $('#new-room-cancel');
+const roomDeleteBtn = $('#room-delete-btn');
+const roomEmojiPickerEl = $('#room-emoji-picker');
+const roomMemberPickerEl = $('#room-member-picker');
+const roomBarEl = $('#room-bar');
+const roomMembersEl = $('#room-members');
+const roomStopBtn = $('#room-stop-btn');
+const roomOptionsBtn = $('#room-options-btn');
+const usageBarsEl = $('#usage-bars');
 
 // A new service worker taking over mid-session means a fresh deploy just
 // landed; reload once so the page picks it up immediately instead of the
@@ -216,6 +235,7 @@ async function boot(token) {
       const data = await res.json();
       vapidPublicKey = data.vapidPublicKey;
       for (const agent of data.agents) roster.set(agent.id, agent);
+      for (const room of data.rooms || []) rooms.set(room.id, room);
       renderAgentList();
       setBadgeLocal(totalUnreadFromRoster());
       renderUsage(data.usage);
@@ -223,10 +243,13 @@ async function boot(token) {
       // Cold-start deep link from a notification tap that had to launch the
       // app fresh (no running tab for the service worker to postMessage
       // into) — see service-worker.js's openWindow fallback.
-      const deepLinkAgentId = new URLSearchParams(location.search).get('agent');
-      if (deepLinkAgentId) {
+      const params = new URLSearchParams(location.search);
+      const deepLinkAgentId = params.get('agent');
+      const deepLinkRoomId = params.get('room');
+      if (deepLinkAgentId || deepLinkRoomId) {
         history.replaceState(null, '', location.pathname + location.hash);
-        if (roster.has(deepLinkAgentId)) openAgent(deepLinkAgentId);
+        if (deepLinkRoomId && rooms.has(deepLinkRoomId)) openRoom(deepLinkRoomId);
+        else if (deepLinkAgentId && roster.has(deepLinkAgentId)) openAgent(deepLinkAgentId);
       }
     }
   } catch (err) {
@@ -238,6 +261,7 @@ async function boot(token) {
   setupVisibility(token);
   setupSettings(token);
   setupNewAgent(token);
+  setupRooms(token);
   setupModelPicker(token);
   setupEffortPicker(token);
   setupTodos(token);
@@ -246,17 +270,24 @@ async function boot(token) {
 
 // ---- Agent list (the landing screen) ----
 const roster = new Map(); // agentId -> roster entry from the server
+const rooms = new Map(); // roomId -> room entry from the server
 let currentAgentId = null; // which agent's chat is open; null = list view
+let currentRoomId = null; // ...or which room's — the two are mutually exclusive
 
 function totalUnreadFromRoster() {
   let sum = 0;
   for (const entry of roster.values()) sum += entry.unreadCount || 0;
+  for (const room of rooms.values()) sum += room.unreadCount || 0;
   return sum;
 }
 
+// Rooms and agents share one list, interleaved by recency — a group chat is
+// just another conversation, and splitting them into sections would mean
+// scrolling past a stale section to reach whatever actually moved last.
 function renderAgentList() {
   agentListEl.innerHTML = '';
-  const entries = [...roster.values()].sort((a, b) => (b.lastMessage?.ts || 0) - (a.lastMessage?.ts || 0));
+  const entries = [...roster.values(), ...rooms.values()]
+    .sort((a, b) => (b.lastMessage?.ts || 0) - (a.lastMessage?.ts || 0));
 
   if (!entries.length) {
     const empty = document.createElement('p');
@@ -267,8 +298,79 @@ function renderAgentList() {
   }
 
   for (const entry of entries) {
-    agentListEl.appendChild(buildAgentRow(entry));
+    agentListEl.appendChild(entry.kind === 'room' ? buildRoomRow(entry) : buildAgentRow(entry));
   }
+}
+
+function buildRoomRow(entry) {
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = 'agent-row room-row';
+  row.dataset.roomId = entry.id;
+
+  const avatar = document.createElement('span');
+  avatar.className = 'agent-avatar';
+  avatar.style.setProperty('--avatar-color', entry.color || '#7c9cff');
+  avatar.textContent = entry.emoji || '👥';
+  if (entry.busyMemberIds?.length) {
+    const dot = document.createElement('span');
+    dot.className = 'agent-working-dot';
+    avatar.appendChild(dot);
+  }
+
+  const body = document.createElement('span');
+  body.className = 'agent-row-body';
+  const nameLine = document.createElement('span');
+  nameLine.className = 'agent-row-name';
+  nameLine.textContent = entry.name;
+  const preview = document.createElement('span');
+  preview.className = 'agent-row-preview';
+  const busy = entry.busyMemberIds?.length || 0;
+  if (busy) {
+    const names = entry.members
+      .filter((m) => entry.busyMemberIds.includes(m.id))
+      .map((m) => m.name)
+      .join(', ');
+    preview.textContent = `${names} ${busy === 1 ? 'is' : 'are'} replying…`;
+  } else if (entry.lastMessage) {
+    preview.textContent = `${entry.lastMessage.sender}: ${extractOptions(entry.lastMessage.text).cleanText.slice(0, 70)}`;
+  } else {
+    preview.textContent = entry.members.length
+      ? `${entry.members.length} member${entry.members.length === 1 ? '' : 's'} · no messages yet`
+      : 'No members yet';
+  }
+  body.append(nameLine, preview);
+
+  const meta = document.createElement('span');
+  meta.className = 'agent-row-meta';
+  const time = document.createElement('span');
+  time.className = 'agent-row-time';
+  time.textContent = formatPreviewTime(entry.lastMessage?.ts);
+  meta.appendChild(time);
+
+  const badges = document.createElement('span');
+  badges.className = 'agent-row-badges';
+  const stack = document.createElement('span');
+  stack.className = 'room-member-stack';
+  for (const m of entry.members.slice(0, 4)) {
+    const chip = document.createElement('span');
+    chip.className = 'room-member-chip';
+    chip.textContent = m.emoji || '🤖';
+    chip.title = m.name;
+    stack.appendChild(chip);
+  }
+  badges.appendChild(stack);
+  if (entry.unreadCount > 0) {
+    const badge = document.createElement('span');
+    badge.className = 'agent-row-badge';
+    badge.textContent = entry.unreadCount > 99 ? '99+' : String(entry.unreadCount);
+    badges.appendChild(badge);
+  }
+  meta.appendChild(badges);
+
+  row.append(avatar, body, meta);
+  row.addEventListener('click', () => openRoom(entry.id));
+  return row;
 }
 
 function formatPreviewTime(ts) {
@@ -375,15 +477,161 @@ function autoResizeInput() {
 
 function showListView() {
   if (currentAgentId) saveDraft(currentAgentId, inputEl.value);
+  if (currentRoomId) saveDraft('room:' + currentRoomId, inputEl.value);
   currentAgentId = null;
+  currentRoomId = null;
   inputEl.value = '';
   chatViewEl.hidden = true;
   listViewEl.hidden = false;
   resetWorkIndicatorState(); // stop the per-second timer for the chat we're leaving
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'view', agentId: null }));
+    ws.send(JSON.stringify({ type: 'room_view', roomId: null }));
   }
   renderAgentList();
+}
+
+// Rooms and agent DMs share the one chat screen — the difference is which
+// controls apply. Model/effort/context/todos are all properties of a single
+// agent's session and mean nothing for a room, so they're swapped out for the
+// member list and the room-wide stop.
+function setChatMode(mode) {
+  const isRoom = mode === 'room';
+  roomBarEl.hidden = !isRoom;
+  usageBarsEl.hidden = isRoom;
+  modelSelect.hidden = isRoom;
+  agentOptionsBtn.hidden = isRoom;
+  roomOptionsBtn.hidden = !isRoom;
+  // Nothing happens in a room until someone is addressed, so the composer
+  // should say so rather than leaving you to discover it.
+  inputEl.placeholder = isRoom ? '@mention someone…' : 'Message…';
+}
+
+function renderRoomMembers(entry) {
+  roomMembersEl.innerHTML = '';
+  for (const m of entry.members) {
+    const chip = document.createElement('button');
+    chip.type = 'button';
+    chip.className = 'room-bar-chip';
+    const busy = entry.busyMemberIds?.includes(m.id);
+    const pending = entry.pendingMemberIds?.includes(m.id);
+    if (busy) chip.classList.add('busy');
+    chip.style.setProperty('--chip-color', m.color || '#7c9cff');
+    chip.textContent = `${m.emoji || '🤖'} ${m.name}`;
+    chip.title = busy
+      ? `${m.name} is replying…`
+      : pending
+        ? `${m.name} hasn't read the latest yet — it will catch up on its next turn`
+        : m.blurb || m.name;
+    if (pending && !busy) {
+      const dot = document.createElement('span');
+      dot.className = 'room-chip-pending';
+      chip.appendChild(dot);
+    }
+    // Tapping a member jumps to its own DM — the place to ask it something
+    // the rest of the room doesn't need to read.
+    chip.addEventListener('click', () => openAgent(m.id));
+    roomMembersEl.appendChild(chip);
+  }
+}
+
+async function openRoom(roomId) {
+  if (currentAgentId) saveDraft(currentAgentId, inputEl.value);
+  if (currentRoomId && currentRoomId !== roomId) saveDraft('room:' + currentRoomId, inputEl.value);
+  const entry = rooms.get(roomId);
+  currentRoomId = roomId;
+  currentAgentId = null;
+  chatAgentEmojiEl.textContent = entry?.emoji || '👥';
+  chatAgentNameEl.textContent = entry?.name || '';
+  setChatMode('room');
+  if (entry) renderRoomMembers(entry);
+  listViewEl.hidden = true;
+  chatViewEl.hidden = false;
+  messagesEl.innerHTML = '';
+  resetWorkIndicatorState();
+  messagePagination = { hasMore: false, loading: false, oldestLoadedId: null };
+  inputEl.value = getDraft('room:' + roomId);
+  autoResizeInput();
+  updateSendButtonMode();
+  hideSlashSuggestions();
+  todoModal.hidden = true;
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'room_view', roomId }));
+  }
+
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}/messages?limit=50`, {
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+    const data = await res.json();
+    for (const m of data.messages || []) renderRoomMessage(m);
+    scrollToBottom();
+  } catch {
+    /* WS will surface connectivity issues via the list-view status line */
+  }
+
+  if (entry) {
+    entry.unreadCount = 0;
+    setBadgeLocal(totalUnreadFromRoster());
+  }
+}
+
+// Room messages carry a sender, so they need a name label the DM view never
+// does — with three or more voices in the feed, colour alone isn't enough to
+// tell who said what.
+function renderRoomMessage(m) {
+  if (m.role === 'system') {
+    const note = document.createElement('div');
+    note.className = 'msg room-system';
+    note.id = 'm-' + m.id;
+    note.textContent = m.text;
+    messagesEl.appendChild(note);
+    return;
+  }
+
+  const isHuman = !m.agentId;
+  const member = m.agentId ? rooms.get(currentRoomId)?.members.find((x) => x.id === m.agentId) : null;
+
+  const el = document.createElement('div');
+  el.className = `msg ${isHuman ? 'user' : 'assistant'} room-msg`;
+  el.id = 'm-' + m.id;
+
+  if (!isHuman) {
+    const sender = document.createElement('div');
+    sender.className = 'room-msg-sender';
+    sender.style.setProperty('--sender-color', member?.color || '#7c9cff');
+    sender.textContent = `${member?.emoji || '🤖'} ${m.sender || member?.name || 'Agent'}`;
+    el.appendChild(sender);
+  }
+
+  const { cleanText, options } = extractOptions(m.text);
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.innerHTML = renderMarkdown(highlightMentions(cleanText));
+  addCodeCopyButtons(bubble);
+  el.appendChild(bubble);
+  if (options.length) el.appendChild(buildOptionButtons(options));
+  el.appendChild(buildCopyButton(cleanText));
+
+  messagesEl.appendChild(el);
+}
+
+// @mentions are the routing mechanism, so they need to be visible as such —
+// scanning a transcript for who was actually handed the next turn is the main
+// thing you do when reading back a discussion you weren't watching live.
+function highlightMentions(text) {
+  const names = (rooms.get(currentRoomId)?.members || [])
+    .map((m) => m.name)
+    .sort((a, b) => b.length - a.length);
+  let out = text;
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    for (const variant of [escaped, escaped.replace(/\\?\s+/g, '')]) {
+      out = out.replace(new RegExp('@' + variant + '(?![\\w-])', 'gi'), (match) => `\`${match}\``);
+    }
+  }
+  return out;
 }
 
 // ---- Message pagination state ----
@@ -395,10 +643,13 @@ let messagePagination = {
 
 async function openAgent(agentId) {
   if (currentAgentId && currentAgentId !== agentId) saveDraft(currentAgentId, inputEl.value);
+  if (currentRoomId) saveDraft('room:' + currentRoomId, inputEl.value);
   const entry = roster.get(agentId);
   currentAgentId = agentId;
+  currentRoomId = null;
   chatAgentEmojiEl.textContent = entry?.emoji || '🤖';
   chatAgentNameEl.textContent = entry?.name || '';
+  setChatMode('agent');
   syncModelSelect(entry);
   syncEffortSlider(entry);
   listViewEl.hidden = true;
@@ -414,6 +665,7 @@ async function openAgent(agentId) {
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'view', agentId }));
+    ws.send(JSON.stringify({ type: 'room_view', roomId: null }));
   }
 
   fetchTodos(agentId).then((todos) => {
@@ -483,6 +735,10 @@ async function loadMoreMessages() {
     const scrollHeightBefore = messagesEl.scrollHeight;
     const fragment = document.createDocumentFragment();
     for (const m of olderMessages) {
+      if (m.role === 'room-ref') {
+        fragment.appendChild(buildRoomRefEl(m));
+        continue;
+      }
       if (m.role === 'compact-summary' || m.role === 'clear-summary') {
         fragment.appendChild(buildCompactSummaryEl(m));
         continue;
@@ -610,6 +866,7 @@ function openAgentForm(agentId) {
 
   newAgentNameInput.value = entry?.name || '';
   newAgentWorkdirInput.value = entry?.workdir || '';
+  newAgentBlurbInput.value = entry?.blurb || '';
   newAgentPersonaInput.value = entry?.systemPrompt || '';
   updatePersonaCounter();
   selectedEmoji = entry?.emoji || AGENT_EMOJIS[0];
@@ -627,6 +884,158 @@ function openAgentForm(agentId) {
 }
 
 let editFormModelTouched = false;
+
+// ---- Group chat creation / editing (same one-sheet-two-modes pattern) ----
+const ROOM_EMOJIS = ['👥', '🧩', '🔧', '🚨', '🧱', '🗂️', '🧭', '⚙️', '🔭', '🏗️', '🧯', '📐'];
+let selectedRoomEmoji = ROOM_EMOJIS[0];
+let selectedMemberIds = new Set();
+
+function buildRoomEmojiPicker() {
+  roomEmojiPickerEl.innerHTML = '';
+  for (const emoji of ROOM_EMOJIS) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'emoji-option' + (emoji === selectedRoomEmoji ? ' active' : '');
+    btn.textContent = emoji;
+    btn.addEventListener('click', () => {
+      selectedRoomEmoji = emoji;
+      for (const b of roomEmojiPickerEl.querySelectorAll('.emoji-option')) b.classList.toggle('active', b === btn);
+    });
+    roomEmojiPickerEl.appendChild(btn);
+  }
+}
+
+function buildMemberPicker() {
+  roomMemberPickerEl.innerHTML = '';
+  const agents = [...roster.values()].sort((a, b) => a.name.localeCompare(b.name));
+  if (!agents.length) {
+    const hint = document.createElement('p');
+    hint.className = 'hint';
+    hint.textContent = 'No agents to invite yet.';
+    roomMemberPickerEl.appendChild(hint);
+    return;
+  }
+  for (const agent of agents) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'member-option' + (selectedMemberIds.has(agent.id) ? ' active' : '');
+    const label = document.createElement('span');
+    label.className = 'member-option-name';
+    label.textContent = `${agent.emoji || '🤖'} ${agent.name}`;
+    btn.appendChild(label);
+    if (agent.blurb) {
+      const desc = document.createElement('span');
+      desc.className = 'member-option-desc';
+      desc.textContent = agent.blurb;
+      btn.appendChild(desc);
+    }
+    btn.addEventListener('click', () => {
+      if (selectedMemberIds.has(agent.id)) selectedMemberIds.delete(agent.id);
+      else selectedMemberIds.add(agent.id);
+      btn.classList.toggle('active', selectedMemberIds.has(agent.id));
+    });
+    roomMemberPickerEl.appendChild(btn);
+  }
+}
+
+function openRoomForm(roomId) {
+  const entry = roomId ? rooms.get(roomId) : null;
+  roomFormIdInput.value = roomId || '';
+  roomFormTitleEl.textContent = entry ? 'Edit group chat' : 'New group chat';
+  newRoomSubmitBtn.textContent = entry ? 'Save changes' : 'Create group chat';
+  roomDeleteBtn.hidden = !entry;
+  newRoomErrorEl.hidden = true;
+
+  newRoomNameInput.value = entry?.name || '';
+  newRoomCharterInput.value = entry?.charter || '';
+  selectedRoomEmoji = entry?.emoji || ROOM_EMOJIS[0];
+  selectedMemberIds = new Set(entry?.memberIds || []);
+  buildRoomEmojiPicker();
+  buildMemberPicker();
+
+  newRoomModal.hidden = false;
+}
+
+function setupRooms(token) {
+  newRoomBtn.addEventListener('click', () => openRoomForm(null));
+  roomOptionsBtn.addEventListener('click', () => {
+    if (currentRoomId) openRoomForm(currentRoomId);
+  });
+  newRoomCancelBtn.addEventListener('click', () => {
+    newRoomModal.hidden = true;
+  });
+  newRoomModal.addEventListener('click', (e) => {
+    if (e.target === newRoomModal) newRoomModal.hidden = true;
+  });
+
+  roomStopBtn.addEventListener('click', () => {
+    if (currentRoomId && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'room_stop', roomId: currentRoomId }));
+    }
+  });
+
+  newRoomForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    newRoomErrorEl.hidden = true;
+    const editingId = roomFormIdInput.value || null;
+    newRoomSubmitBtn.disabled = true;
+    newRoomSubmitBtn.textContent = editingId ? 'Saving…' : 'Creating…';
+    try {
+      const res = await fetch(editingId ? `/api/rooms/${encodeURIComponent(editingId)}` : '/api/rooms', {
+        method: editingId ? 'PATCH' : 'POST',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newRoomNameInput.value,
+          emoji: selectedRoomEmoji,
+          charter: newRoomCharterInput.value,
+          memberIds: [...selectedMemberIds],
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'failed');
+      rooms.set(data.room.id, data.room);
+      newRoomModal.hidden = true;
+      if (currentRoomId === data.room.id) {
+        chatAgentEmojiEl.textContent = data.room.emoji || '👥';
+        chatAgentNameEl.textContent = data.room.name;
+        renderRoomMembers(data.room);
+      }
+      renderAgentList();
+    } catch (err) {
+      newRoomErrorEl.textContent = err.message;
+      newRoomErrorEl.hidden = false;
+    } finally {
+      newRoomSubmitBtn.disabled = false;
+      newRoomSubmitBtn.textContent = roomFormIdInput.value ? 'Save changes' : 'Create group chat';
+    }
+  });
+
+  roomDeleteBtn.addEventListener('click', async () => {
+    const roomId = roomFormIdInput.value;
+    if (!roomId) return;
+    const entry = rooms.get(roomId);
+    // Deleting a room throws away its transcript; the members and their own
+    // histories are untouched, which is worth saying explicitly here.
+    if (!confirm(`Delete "${entry?.name || 'this group chat'}"? The discussion is lost — the agents themselves are not.`)) return;
+    roomDeleteBtn.disabled = true;
+    try {
+      const res = await fetch(`/api/rooms/${encodeURIComponent(roomId)}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error('failed');
+      rooms.delete(roomId);
+      newRoomModal.hidden = true;
+      if (currentRoomId === roomId) showListView();
+      else renderAgentList();
+    } catch {
+      newRoomErrorEl.textContent = 'Could not delete this group chat.';
+      newRoomErrorEl.hidden = false;
+    } finally {
+      roomDeleteBtn.disabled = false;
+    }
+  });
+}
 
 function setupNewAgent(token) {
   newAgentModelSelect.addEventListener('change', () => {
@@ -661,6 +1070,7 @@ function setupNewAgent(token) {
       emoji: selectedEmoji,
       color: selectedColor,
       workdir: newAgentWorkdirInput.value,
+      blurb: newAgentBlurbInput.value,
       systemPrompt: newAgentPersonaInput.value,
     };
     // Only touch model/provider on an edit if the user actually changed the
@@ -1288,10 +1698,19 @@ function handleServerEvent(msg) {
     case 'hello':
       roster.clear();
       for (const agent of msg.agents) roster.set(agent.id, agent);
+      rooms.clear();
+      for (const room of msg.rooms || []) rooms.set(room.id, room);
       if (!listViewEl.hidden) renderAgentList();
       setBadgeLocal(totalUnreadFromRoster());
       renderUsage(msg.usage);
-      if (currentAgentId && !roster.has(currentAgentId)) {
+      if (currentRoomId && !rooms.has(currentRoomId)) {
+        showListView();
+      } else if (currentRoomId) {
+        // Same reasoning as the agent branch below: a whole discussion can
+        // have run while the socket was dead, so re-fetch rather than trust
+        // whatever is still on screen.
+        openRoom(currentRoomId);
+      } else if (currentAgentId && !roster.has(currentAgentId)) {
         showListView();
       } else if (currentAgentId) {
         // Reconnect while a chat was open — the socket may have been dead
@@ -1336,6 +1755,38 @@ function handleServerEvent(msg) {
         renderTodoBadge(currentTodos);
         if (!todoModal.hidden) renderTodoList(currentTodos);
       }
+      break;
+
+    case 'room_entry': {
+      rooms.set(msg.room.id, msg.room);
+      if (!listViewEl.hidden) renderAgentList();
+      // The member strip carries the live "who is replying" state, so it has
+      // to re-render on every room_entry, not just on open.
+      if (currentRoomId === msg.room.id) {
+        renderRoomMembers(msg.room);
+        updateSendButtonMode(); // busy-member count drives the send/stop toggle
+      }
+      setBadgeLocal(totalUnreadFromRoster());
+      break;
+    }
+
+    case 'room_message':
+      if (msg.roomId === currentRoomId) {
+        if (!document.getElementById('m-' + msg.message.id)) {
+          renderRoomMessage({ ...msg.message, sender: msg.message.agentId
+            ? rooms.get(currentRoomId)?.members.find((m) => m.id === msg.message.agentId)?.name
+            : 'You' });
+          scrollToBottom();
+        }
+      }
+      break;
+
+    case 'room_removed':
+      rooms.delete(msg.roomId);
+      if (currentRoomId === msg.roomId) showListView();
+      else if (!listViewEl.hidden) renderAgentList();
+      saveDraft('room:' + msg.roomId, '');
+      setBadgeLocal(totalUnreadFromRoster());
       break;
 
     case 'agent_removed':
@@ -1539,7 +1990,10 @@ function clearLiveTools() {
 let composerMode = 'send';
 
 function updateSendButtonMode() {
-  const shouldStop = workStartTs !== null && inputEl.value.trim() === '';
+  // In a room the work isn't this screen's own turn — it's however many
+  // members happen to be mid-reply, which only the roster knows about.
+  const roomBusy = currentRoomId ? (rooms.get(currentRoomId)?.busyMemberIds?.length || 0) > 0 : false;
+  const shouldStop = (currentRoomId ? roomBusy : workStartTs !== null) && inputEl.value.trim() === '';
   composerMode = shouldStop ? 'stop' : 'send';
   sendBtn.textContent = shouldStop ? '■' : '↑';
   sendBtn.classList.toggle('stop-mode', shouldStop);
@@ -1607,6 +2061,56 @@ const SLASH_COMMAND_DESCRIPTIONS = {
   'design-consent': 'Grant Claude Design access authorization',
   'design-revoke': 'Revoke Claude Design access authorization',
 };
+
+// @mention autocomplete, reusing the slash-suggestion strip. Restricted to
+// this room's members: mentioning someone who isn't in the room resolves to
+// nobody server-side, and offering the whole roster here would invite exactly
+// that. Inserts the full name, which is what the server's parser matches most
+// reliably when names contain spaces.
+function updateMentionSuggestions() {
+  const match = inputEl.value.match(/@([^@\s]*)$/);
+  const members = rooms.get(currentRoomId)?.members || [];
+  if (!match || !members.length) {
+    hideSlashSuggestions();
+    return;
+  }
+
+  const prefix = match[1].toLowerCase();
+  const matches = members.filter((m) => m.name.toLowerCase().replace(/\s+/g, '').startsWith(prefix.replace(/\s+/g, '')));
+  if (!matches.length) {
+    hideSlashSuggestions();
+    return;
+  }
+
+  slashSuggestionsEl.innerHTML = '';
+  for (const m of matches) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'slash-suggestion';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'slash-suggestion-name';
+    nameEl.textContent = `${m.emoji || '🤖'} @${m.name}`;
+    btn.appendChild(nameEl);
+
+    if (m.blurb) {
+      const descEl = document.createElement('span');
+      descEl.className = 'slash-suggestion-desc';
+      descEl.textContent = m.blurb;
+      btn.appendChild(descEl);
+    }
+
+    btn.addEventListener('click', () => {
+      inputEl.value = inputEl.value.replace(/@([^@\s]*)$/, `@${m.name} `);
+      autoResizeInput();
+      updateSendButtonMode();
+      hideSlashSuggestions();
+      inputEl.focus();
+    });
+    slashSuggestionsEl.appendChild(btn);
+  }
+  slashSuggestionsEl.hidden = false;
+}
 
 function updateSlashSuggestions() {
   // Only while composing the command name itself (no space yet) — once
@@ -1963,7 +2467,38 @@ function buildThinkingDetails(text, tokens) {
   return details;
 }
 
+// Left in an agent's own DM whenever a turn's reply went to a room instead —
+// otherwise its chat shows an unexplained gap where it was clearly busy, with
+// no way to find out what it actually said.
+function buildRoomRefEl(m) {
+  const el = document.createElement('button');
+  el.type = 'button';
+  el.className = 'msg room-ref';
+  if (m.id) el.id = 'm-' + m.id;
+
+  const title = document.createElement('div');
+  title.className = 'room-ref-title';
+  title.textContent = `${m.roomEmoji || '👥'} Replied in ${m.roomName ? '#' + m.roomName : 'a group chat'}`;
+  el.appendChild(title);
+
+  if (m.preview) {
+    const preview = document.createElement('div');
+    preview.className = 'room-ref-preview';
+    preview.textContent = m.preview;
+    el.appendChild(preview);
+  }
+
+  el.addEventListener('click', () => {
+    if (m.roomId && rooms.has(m.roomId)) openRoom(m.roomId);
+  });
+  return el;
+}
+
 function renderMessage(m) {
+  if (m.role === 'room-ref') {
+    messagesEl.appendChild(buildRoomRefEl(m));
+    return;
+  }
   if (m.role === 'compact-summary' || m.role === 'clear-summary') {
     messagesEl.appendChild(buildCompactSummaryEl(m));
     return;
@@ -2101,14 +2636,20 @@ function setStatus(text, ok) {
 // are just different ways of producing the next message to the open agent.
 function sendMessage(text) {
   const trimmed = text.trim();
-  if (!trimmed || !ws || ws.readyState !== WebSocket.OPEN || !currentAgentId) return;
-  ws.send(JSON.stringify({ type: 'message', agentId: currentAgentId, text: trimmed }));
+  if (!trimmed || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (currentRoomId) {
+    ws.send(JSON.stringify({ type: 'room_message', roomId: currentRoomId, text: trimmed }));
+  } else if (currentAgentId) {
+    ws.send(JSON.stringify({ type: 'message', agentId: currentAgentId, text: trimmed }));
+  }
 }
 
 formEl.addEventListener('submit', (e) => {
   e.preventDefault();
   if (composerMode === 'stop') {
-    if (currentAgentId && ws && ws.readyState === WebSocket.OPEN) {
+    if (currentRoomId && ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ type: 'room_stop', roomId: currentRoomId }));
+    } else if (currentAgentId && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: 'stop', agentId: currentAgentId }));
     }
     return;
@@ -2116,7 +2657,7 @@ formEl.addEventListener('submit', (e) => {
   sendMessage(inputEl.value);
   inputEl.value = '';
   autoResizeInput();
-  saveDraft(currentAgentId, ''); // sent — no longer a draft
+  saveDraft(currentRoomId ? 'room:' + currentRoomId : currentAgentId, ''); // sent — no longer a draft
   updateSendButtonMode();
   hideSlashSuggestions();
 });
@@ -2125,12 +2666,14 @@ let draftSaveTimer = null;
 inputEl.addEventListener('input', () => {
   autoResizeInput();
   updateSendButtonMode();
-  updateSlashSuggestions();
+  if (currentRoomId) updateMentionSuggestions();
+  else updateSlashSuggestions();
   // Debounced so every keystroke doesn't hit localStorage, but short enough
   // that backgrounding the app moments after typing still catches it —
   // the visibilitychange/pagehide flushes below are the hard guarantee.
   clearTimeout(draftSaveTimer);
-  draftSaveTimer = setTimeout(() => saveDraft(currentAgentId, inputEl.value), 300);
+  const draftKey = currentRoomId ? 'room:' + currentRoomId : currentAgentId;
+  draftSaveTimer = setTimeout(() => saveDraft(draftKey, inputEl.value), 300);
 });
 
 // ---- Visibility -> badge + read receipts ----
@@ -2161,7 +2704,24 @@ function setupVisibility(token) {
 
   navigator.serviceWorker?.addEventListener('message', async (event) => {
     if (event.data?.type === 'notification-click') {
+      const targetRoomId = event.data.roomId;
       const targetAgentId = event.data.agentId;
+      // A room notification wins: it's only ever sent when a discussion came
+      // to rest and handed the thread back, which is the thing worth opening.
+      if (targetRoomId) {
+        if (!rooms.has(targetRoomId)) {
+          try {
+            const res = await fetch('/api/roster', { headers: { Authorization: `Bearer ${currentToken}` } });
+            const data = await res.json();
+            for (const r of data.rooms || []) rooms.set(r.id, r);
+          } catch {
+            /* offline — fall through to the badge-only fallback below */
+          }
+        }
+        if (rooms.has(targetRoomId)) openRoom(targetRoomId);
+        else setBadgeLocal(totalUnreadFromRoster());
+        return;
+      }
       if (!targetAgentId) {
         setBadgeLocal(totalUnreadFromRoster());
         return;

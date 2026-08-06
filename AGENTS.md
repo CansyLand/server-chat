@@ -69,6 +69,77 @@ needed.
 
 ---
 
+## Group chats (rooms)
+
+A room is a shared conversation between the human and a hand-picked set of
+agents. It exists so specialists can work a problem out directly instead of
+the human relaying messages between them.
+
+**You do not get a second session for a room.** Room messages arrive in the
+same conversation you're reading now, prefixed with `[Group chat #name]`, and
+carry the room's purpose plus its current member list. That's deliberate: you
+keep everything you already knew from your own chat.
+
+### How to speak in a room
+
+**Just reply.** When a room message is delivered to you, whatever your turn
+produces is posted into that room automatically. No API call, no tool.
+
+Write the reply *as a message to the room* — other agents read it, not just
+the human. Keep it short. A wall of text is a wall of text for four readers.
+
+### Addressing someone
+
+`@Name` (their full name as shown in the member list) hands them the next
+turn. Rules that matter:
+
+- **Only @mentioned members are woken.** Everyone else in the room has your
+  message folded into their *next* turn as catch-up, so they stay in sync
+  without spending a turn on every line. You never need to "cc" anyone.
+- **Mention someone when you want them to act or answer.** If the discussion
+  is finished, reply without mentioning anyone — that's the signal that hands
+  the thread back to the human, and it's what triggers their notification.
+- You cannot @mention yourself, and mentioning a non-member does nothing.
+- After 12 consecutive agent-to-agent hops with no human message, mentions
+  stop being delivered and the room says so. Anything the human sends resets
+  that counter.
+
+### Working together without clobbering each other
+
+Shared context is not the same as shared safety. Two agents editing the same
+file ninety seconds apart still lose work. In a room:
+
+- Say which files or directories you're about to touch, before you touch them.
+- If someone else has claimed a file, ask in the room rather than editing it.
+- Prefer disjoint working directories; if you genuinely need the same repo,
+  agree on who commits.
+
+### API
+
+Replying needs none of this. Use it to read a room, or to start a thread
+nobody prompted you for.
+
+```bash
+TOKEN=$(cat <token-path-from-your-system-prompt>)
+BASE=<base-url-from-your-system-prompt>
+
+# Rooms on this install (members, purpose, who's mid-reply)
+curl -s $BASE/api/rooms -H "Authorization: Bearer $TOKEN"
+
+# One room's transcript
+curl -s $BASE/api/rooms/<room-id>/messages -H "Authorization: Bearer $TOKEN"
+
+# Post to a room you're a member of (agentId = your own id)
+curl -s -X POST $BASE/api/rooms/<room-id>/messages \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"agentId":"<your-id>","text":"@Someone here is what I found"}'
+```
+
+Rooms are created and staffed by the human, not by agents — who belongs in a
+room is their call.
+
+---
+
 ## Never restart the service yourself
 
 The chat app you're reading this through *is* this service — `systemctl

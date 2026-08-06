@@ -43,6 +43,7 @@ self.addEventListener('push', (event) => {
   const body = data.body || 'New message';
   const unread = typeof data.unread === 'number' ? data.unread : undefined;
   const agentId = typeof data.agentId === 'string' ? data.agentId : null;
+  const roomId = typeof data.roomId === 'string' ? data.roomId : null;
 
   event.waitUntil(
     (async () => {
@@ -50,9 +51,9 @@ self.addEventListener('push', (event) => {
         body,
         icon: '/icons/icon-192.png',
         badge: '/icons/icon-192.png',
-        tag: agentId || 'xqlytskg-chat',
+        tag: agentId || roomId || 'xqlytskg-chat',
         renotify: true,
-        data: { agentId },
+        data: { agentId, roomId },
       });
       if (unread !== undefined && 'setAppBadge' in self.navigator) {
         try {
@@ -68,13 +69,14 @@ self.addEventListener('push', (event) => {
 
 self.addEventListener('notificationclick', (event) => {
   const agentId = event.notification.data?.agentId || null;
+  const roomId = event.notification.data?.roomId || null;
   event.notification.close();
   event.waitUntil(
     (async () => {
       const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
       for (const client of allClients) {
         if ('focus' in client) {
-          client.postMessage({ type: 'notification-click', agentId });
+          client.postMessage({ type: 'notification-click', agentId, roomId });
           return client.focus();
         }
       }
@@ -82,7 +84,10 @@ self.addEventListener('notificationclick', (event) => {
       // iOS) — fall back to a URL param so the fresh page load can deep-link
       // once it boots, instead of silently landing on the plain agent list.
       if (self.clients.openWindow) {
-        return self.clients.openWindow(agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/');
+        const target = roomId
+          ? `/?room=${encodeURIComponent(roomId)}`
+          : agentId ? `/?agent=${encodeURIComponent(agentId)}` : '/';
+        return self.clients.openWindow(target);
       }
     })()
   );

@@ -5,10 +5,15 @@ import { randomUUID } from 'node:crypto';
 const DATA_DIR = path.join(process.cwd(), 'data');
 const AGENTS_FILE = path.join(DATA_DIR, 'agents.json');
 const DEVICE_FILE = path.join(DATA_DIR, 'device.json');
+const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');
 const LEGACY_STATE_FILE = path.join(DATA_DIR, 'state.json');
 
 function messagesFile(agentId) {
   return path.join(DATA_DIR, `agent-${agentId}-messages.json`);
+}
+
+function roomMessagesFile(roomId) {
+  return path.join(DATA_DIR, `room-${roomId}-messages.json`);
 }
 
 function todosFile(agentId) {
@@ -74,6 +79,7 @@ function migrateLegacyIfNeeded() {
 migrateLegacyIfNeeded();
 
 let agentsState = readJson(AGENTS_FILE, { agents: [] });
+let roomsState = readJson(ROOMS_FILE, { rooms: [] });
 let deviceState = readJson(DEVICE_FILE, { paired: false, pushSubscription: null });
 const messageState = new Map(); // agentId -> { messages, unreadCount }
 const saveTimers = new Map(); // debounce key -> timeout handle
@@ -85,6 +91,23 @@ function debounced(key, fn) {
 
 function saveAgents() {
   debounced('agents', () => writeJson(AGENTS_FILE, agentsState));
+}
+
+function saveRooms() {
+  debounced('rooms', () => writeJson(ROOMS_FILE, roomsState));
+}
+
+const roomMessageState = new Map(); // roomId -> { messages, unreadCount }
+
+function loadRoomMessages(roomId) {
+  if (!roomMessageState.has(roomId)) {
+    roomMessageState.set(roomId, readJson(roomMessagesFile(roomId), { messages: [], unreadCount: 0 }));
+  }
+  return roomMessageState.get(roomId);
+}
+
+function saveRoomMessages(roomId) {
+  debounced(`room-messages:${roomId}`, () => writeJson(roomMessagesFile(roomId), loadRoomMessages(roomId)));
 }
 
 function saveDevice() {
@@ -140,7 +163,7 @@ export const store = {
   getAgent(id) {
     return agentsState.agents.find((a) => a.id === id) || null;
   },
-  createAgent({ name, emoji, color, workdir, systemPrompt, model, provider, effort }) {
+  createAgent({ name, emoji, color, workdir, systemPrompt, model, provider, effort, blurb }) {
     const agent = {
       id: randomUUID().slice(0, 8),
       name,
@@ -148,6 +171,11 @@ export const store = {
       color,
       workdir,
       systemPrompt: systemPrompt || null,
+      // One line of "what I'm the expert in", shown to *other* agents — in
+      // their system prompt and in every group-chat delivery header. Distinct
+      // from systemPrompt, which is this agent's own private instructions and
+      // is far too long (and often too specific) to hand to everyone else.
+      blurb: blurb || null,
       model: model || null,
       provider: provider || null,
       effort: effort || null,
@@ -177,6 +205,14 @@ export const store = {
     if (idx === -1) return false;
     agentsState.agents.splice(idx, 1);
     saveAgents();
+    // A deleted agent must not linger as a phantom member: rooms would keep
+    // listing it, and @mentions of its name would resolve to nothing.
+    for (const room of roomsState.rooms) {
+      const memberIdx = room.memberIds.indexOf(id);
+      if (memberIdx !== -1) room.memberIds.splice(memberIdx, 1);
+      delete room.seen[id];
+    }
+    saveRooms();
     messageState.delete(id);
     todoState.delete(id);
     for (const file of [messagesFile(id), todosFile(id)]) {
@@ -259,5 +295,103 @@ export const store = {
     list.splice(idx, 1);
     saveTodos(agentId);
     return true;
+  },
+
+  // ---- rooms: group chats holding several agents plus the human. A room is
+  // purely a delivery mechanism — it owns no Claude process of its own. Each
+  // member keeps its single existing session; the room just decides whose
+  // session a given message gets fed into. ----
+  listRooms() {
+    return roomsState.rooms;
+  },
+  getRoom(id) {
+    return roomsState.rooms.find((r) => r.id === id) || null;
+  },
+  createRoom({ name, emoji, color, charter, memberIds }) {
+    const room = {
+      id: randomUUID().slice(0, 8),
+      name,
+      emoji: emoji || '👥',
+      color: color || '#7c9cff',
+      charter: charter || null,
+      memberIds: memberIds || [],
+      // Per-member high-water mark of the room transcript already folded into
+      // that agent's session (by message seq, not array index — the transcript
+      // is trimmed at the front, which would silently shift indices).
+      seen: {},
+      nextSeq: 1,
+      createdAt: Date.now(),
+    };
+    roomsState.rooms.push(room);
+    saveRooms();
+    return room;
+  },
+  updateRoom(id, patch) {
+    const room = this.getRoom(id);
+    if (!room) return null;
+    Object.assign(room, patch);
+    saveRooms();
+    return room;
+  },
+  removeRoom(id) {
+    const idx = roomsState.rooms.findIndex((r) => r.id === id);
+    if (idx === -1) return false;
+    roomsState.rooms.splice(idx, 1);
+    saveRooms();
+    roomMessageState.delete(id);
+    try {
+      fs.unlinkSync(roomMessagesFile(id));
+    } catch {
+      /* never written — fine */
+    }
+    return true;
+  },
+
+  getRoomMessages(roomId) {
+    return loadRoomMessages(roomId).messages;
+  },
+  addRoomMessage(roomId, msg) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    const stored = { ...msg, seq: room.nextSeq };
+    room.nextSeq += 1;
+    saveRooms();
+    const s = loadRoomMessages(roomId);
+    s.messages.push(stored);
+    if (s.messages.length > 500) s.messages.shift();
+    saveRoomMessages(roomId);
+    return stored;
+  },
+
+  // How far through the room transcript this agent's session has been brought
+  // up to date. Messages past this point are the "catch-up" block prepended to
+  // the next thing that agent is actually asked to answer — which is how a
+  // member that wasn't @mentioned still ends up having read the whole
+  // discussion, without burning a turn per message.
+  getRoomSeen(roomId, agentId) {
+    return this.getRoom(roomId)?.seen[agentId] || 0;
+  },
+  setRoomSeen(roomId, agentId, seq) {
+    const room = this.getRoom(roomId);
+    if (!room) return;
+    room.seen[agentId] = seq;
+    saveRooms();
+  },
+
+  getRoomUnread(roomId) {
+    return loadRoomMessages(roomId).unreadCount;
+  },
+  incrementRoomUnread(roomId) {
+    const s = loadRoomMessages(roomId);
+    s.unreadCount += 1;
+    saveRoomMessages(roomId);
+    return s.unreadCount;
+  },
+  clearRoomUnread(roomId) {
+    const s = loadRoomMessages(roomId);
+    if (s.unreadCount !== 0) {
+      s.unreadCount = 0;
+      saveRoomMessages(roomId);
+    }
   },
 };

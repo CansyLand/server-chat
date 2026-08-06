@@ -135,6 +135,15 @@ html, body {
   padding: 0 6px;
 }
 
+#new-room-btn {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 1.05rem;
+  line-height: 1;
+  padding: 0 4px;
+}
+
 #back-btn {
   background: none;
   border: none;
@@ -146,7 +155,8 @@ html, body {
 .chat-agent-emoji { font-size: 1.2rem; line-height: 1; }
 #chat-agent-name { margin-right: auto; }
 
-#agent-options-btn {
+#agent-options-btn,
+#room-options-btn {
   background: none;
   border: none;
   color: var(--text-dim);
@@ -288,6 +298,170 @@ html, body {
   align-items: center;
   justify-content: center;
 }
+
+/* ---- Group chats ---------------------------------------------------------
+   Rooms sit in the same list as agents, so a room row deliberately reuses
+   .agent-row wholesale — the only difference is that its "avatar" stands for
+   several agents, shown as a stack of member emoji instead of an unread
+   count. */
+.room-row .agent-avatar { border-radius: 16px; }
+
+.room-member-stack {
+  display: flex;
+  align-items: center;
+}
+/* Overlapped rather than spaced: 4 members have to fit in the width one
+   badge used to occupy, without pushing the timestamp off the row. */
+.room-member-chip {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--bubble-assistant);
+  border: 1.5px solid var(--bg);
+  font-size: 0.62rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.room-member-chip + .room-member-chip { margin-left: -6px; }
+
+/* Room mode replaces #usage-bars, which is entirely agent-scoped. */
+#room-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid #232328;
+  min-height: 40px;
+}
+#room-members {
+  flex: 1;
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+#room-members::-webkit-scrollbar { display: none; }
+
+.room-bar-chip {
+  position: relative;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: var(--bubble-assistant);
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.72rem;
+  white-space: nowrap;
+}
+/* Its own animation rather than work-pulse: that one scales and fades the
+   element, which is right for a 12px dot and wrong for a text chip that has
+   to stay readable while it pulses. */
+.room-bar-chip.busy {
+  border-color: var(--chip-color, var(--accent));
+  color: var(--text);
+  animation: chip-pulse 1.4s ease-in-out infinite;
+}
+@keyframes chip-pulse {
+  0%, 100% { border-color: transparent; }
+  50% { border-color: var(--chip-color, var(--accent)); }
+}
+/* Carrying room context it hasn't had a turn on yet — it will read the
+   backlog on its next turn, so this is "behind", not "broken". */
+.room-chip-pending {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-dim);
+}
+
+#room-stop-btn {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--bubble-assistant);
+  color: var(--text-dim);
+  font-size: 0.7rem;
+  line-height: 1;
+}
+#room-stop-btn:active { background: var(--error, #ff6b6b); color: #fff; }
+
+/* With three or more voices in one feed, the sender label is what makes the
+   transcript readable — colour alone stops scaling past two participants. */
+.room-msg-sender {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--sender-color, var(--accent));
+  margin-bottom: 3px;
+  padding-left: 2px;
+}
+.msg.room-system {
+  align-self: center;
+  max-width: 90%;
+  text-align: center;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  font-style: italic;
+}
+
+/* The marker left in an agent's own DM when its reply went to a room. */
+.msg.room-ref {
+  align-self: stretch;
+  max-width: 100%;
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 1px solid #232328;
+  border-radius: 12px;
+  background: none;
+  color: var(--text);
+  font-family: inherit;
+  padding: 8px 12px;
+}
+.msg.room-ref:active { background: rgba(255, 255, 255, 0.04); }
+.room-ref-title { font-size: 0.78rem; font-weight: 600; color: var(--accent); }
+.room-ref-preview {
+  margin-top: 3px;
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  overflow: hidden;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+}
+
+/* Member picker in the room sheet — a checkbox list would read as a form;
+   these read as people you're inviting. */
+#room-member-picker { display: flex; flex-direction: column; gap: 4px; }
+.member-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  text-align: left;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #232328;
+  background: none;
+  color: var(--text-dim);
+  font-family: inherit;
+}
+.member-option.active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(124, 156, 255, 0.08);
+}
+.member-option-name { font-size: 0.85rem; font-weight: 600; }
+.member-option-desc { font-size: 0.72rem; color: var(--text-dim); }
+
+#new-room-form { display: flex; flex-direction: column; gap: 6px; }
 
 /* ---- New-agent sheet ---- */
 .sheet-title { margin: 0 0 4px; font-size: 1.1rem; }
