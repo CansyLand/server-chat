@@ -90,6 +90,9 @@
       <button id="todo-btn" type="button" aria-label="Tasks">✅<span id="todo-badge" class="todo-badge" hidden>0</span></button>
     </div>
     <main id="messages"></main>
+    <!-- Shown only while scrolled away from the bottom: replies no longer
+         drag the view down, so this is what stops new ones going unnoticed. -->
+    <button id="jump-to-latest" type="button" hidden aria-label="Jump to latest">↓ Latest</button>
     <div id="slash-suggestions" hidden></div>
     <form id="composer">
       <textarea id="input" rows="1" placeholder="Message…" autocomplete="off"></textarea>

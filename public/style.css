@@ -125,6 +125,31 @@ html, body {
   display: flex;
   flex-direction: column;
 }
+/* Anchors #jump-to-latest, which floats over the feed rather than sitting in
+   the column — as a flex child it would shift the whole transcript up and
+   down as it appears and disappears. */
+#chat-view { position: relative; }
+
+#jump-to-latest {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  /* Sits just above the composer, which grows as the textarea does — the
+     height is published as a custom property from autoResizeInput() rather
+     than guessed at, so the pill never ends up behind it. */
+  bottom: calc(var(--composer-h, 56px) + 8px);
+  z-index: 5;
+  padding: 6px 14px;
+  border: 1px solid #2c2c33;
+  border-radius: 16px;
+  background: var(--surface);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
+#jump-to-latest:active { background: var(--bubble-assistant); }
 
 #new-agent-btn {
   background: none;

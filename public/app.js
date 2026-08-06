@@ -80,6 +80,7 @@ const roomMembersEl = $('#room-members');
 const roomStopBtn = $('#room-stop-btn');
 const roomOptionsBtn = $('#room-options-btn');
 const usageBarsEl = $('#usage-bars');
+const jumpToLatestBtn = $('#jump-to-latest');
 
 // A new service worker taking over mid-session means a fresh deploy just
 // landed; reload once so the page picks it up immediately instead of the
@@ -473,6 +474,9 @@ function saveDraft(agentId, text) {
 function autoResizeInput() {
   inputEl.style.height = 'auto';
   inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+  // Published for #jump-to-latest, which floats just above the composer and
+  // would otherwise be hidden behind it once the textarea grows.
+  chatViewEl.style.setProperty('--composer-h', formEl.offsetHeight + 'px');
 }
 
 function showListView() {
@@ -483,6 +487,8 @@ function showListView() {
   inputEl.value = '';
   chatViewEl.hidden = true;
   listViewEl.hidden = false;
+  pinnedToBottom = true; // next chat opens at its bottom, whatever this one was doing
+  updateJumpToLatest();
   resetWorkIndicatorState(); // stop the per-second timer for the chat we're leaving
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'view', agentId: null }));
@@ -548,6 +554,8 @@ async function openRoom(roomId) {
   listViewEl.hidden = true;
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
+  pinnedToBottom = true; // a freshly opened chat always starts at its newest message
+  updateJumpToLatest();
   resetWorkIndicatorState();
   messagePagination = { hasMore: false, loading: false, oldestLoadedId: null };
   inputEl.value = getDraft('room:' + roomId);
@@ -699,6 +707,8 @@ async function openAgent(agentId) {
   listViewEl.hidden = true;
   chatViewEl.hidden = false;
   messagesEl.innerHTML = '';
+  pinnedToBottom = true; // a freshly opened chat always starts at its newest message
+  updateJumpToLatest();
   resetWorkIndicatorState();
   messagePagination = { hasMore: false, loading: false, oldestLoadedId: null };
   inputEl.value = getDraft(agentId);
@@ -832,6 +842,9 @@ async function loadMoreMessages() {
 
 // Scroll listener for loading more messages
 messagesEl.addEventListener('scroll', () => {
+  // The only place the pin is (re)decided — see scrollToBottomIfPinned.
+  pinnedToBottom = distanceFromBottom() <= SCROLL_PIN_THRESHOLD;
+  updateJumpToLatest();
   // Load more when scrolled near top (within 200px)
   if (messagesEl.scrollTop < 200) {
     loadMoreMessages();
@@ -840,6 +853,7 @@ messagesEl.addEventListener('scroll', () => {
 
 function setupNav() {
   backBtn.addEventListener('click', showListView);
+  jumpToLatestBtn.addEventListener('click', () => scrollToBottom());
 }
 
 // A shortcut for typing "/compact" by hand — same message, just one tap.
@@ -1820,7 +1834,10 @@ function handleServerEvent(msg) {
           renderRoomMessage({ ...msg.message, sender: msg.message.agentId
             ? rooms.get(currentRoomId)?.members.find((m) => m.id === msg.message.agentId)?.name
             : 'You' });
-          scrollToBottom();
+          // Your own message always jumps to the bottom — you just sent it, so
+          // that's unambiguously where you want to be. An agent's does not.
+          if (msg.message.agentId) scrollToBottomIfPinned();
+          else scrollToBottom();
         }
       }
       break;
@@ -1937,7 +1954,7 @@ function handleServerEvent(msg) {
         // Clean up live tool elements — they'll be replaced by the final message
         clearLiveTools();
         if (!document.getElementById('m-' + msg.message.id)) renderMessage(msg.message);
-        scrollToBottom();
+        scrollToBottomIfPinned();
       }
       break;
 
@@ -2263,7 +2280,7 @@ function startWorkIndicator(startedAt, toolName, waitingUntil) {
     liveRawText = '';
     liveThinkingText = '';
     liveThinkingTokens = 0;
-    scrollToBottom();
+    scrollToBottomIfPinned();
   }
   workStartTs = startedAt;
   liveBubble.classList.toggle('waiting', !!waitingUntil);
@@ -2310,7 +2327,7 @@ function appendLiveDelta(text) {
   const liveTextEl = liveBubble.querySelector('.live-text');
   liveTextEl.innerHTML = renderMarkdown(extractOptions(liveRawText).cleanText);
   addCodeCopyButtons(liveTextEl);
-  scrollToBottom();
+  scrollToBottomIfPinned();
 }
 
 // Renders thinking as it streams in, so opening the app mid-turn shows what
@@ -2663,11 +2680,44 @@ function buildCompactSummaryEl(msg) {
 // well before the persisted copy could round-trip through a history reload.
 function renderCompactSummary(msg) {
   messagesEl.appendChild(buildCompactSummaryEl(msg));
-  scrollToBottom();
+  scrollToBottomIfPinned();
+}
+
+// ---- Scroll anchoring -----------------------------------------------------
+// Arriving messages used to force the feed to the bottom unconditionally,
+// which makes reading anything mid-conversation impossible: a long agent reply
+// streams in token by token and yanks the view away on every chunk. Instead,
+// follow the bottom only while the reader is already there.
+//
+// The flag is only ever updated from real scroll events. Appending content
+// does not fire a scroll event, so a flag captured before the append still
+// describes what the reader wanted — which is exactly the question being
+// asked here.
+const SCROLL_PIN_THRESHOLD = 80; // px of slack, so "close enough" still counts as pinned
+let pinnedToBottom = true;
+
+function distanceFromBottom() {
+  return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight;
 }
 
 function scrollToBottom() {
   messagesEl.scrollTop = messagesEl.scrollHeight;
+  pinnedToBottom = true;
+  updateJumpToLatest();
+}
+
+// For anything the reader didn't ask for: new replies, streaming text, tool
+// output. Their own sends still scroll unconditionally.
+function scrollToBottomIfPinned() {
+  if (pinnedToBottom) scrollToBottom();
+  else updateJumpToLatest();
+}
+
+function updateJumpToLatest() {
+  // Without this, scrolling up to read means new arrivals are silent and
+  // off-screen — the pill is what makes "don't follow automatically" safe
+  // rather than just quiet.
+  jumpToLatestBtn.hidden = pinnedToBottom || !!chatViewEl.hidden;
 }
 
 function setStatus(text, ok) {
