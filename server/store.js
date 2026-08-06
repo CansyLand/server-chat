@@ -378,6 +378,17 @@ export const store = {
     saveRooms();
   },
 
+  // Digests arrive seconds after the message they describe (a separate model
+  // call), so they're patched onto the stored message rather than being part
+  // of it — the transcript must never wait on the overview.
+  setRoomMessageDigest(roomId, messageId, digest) {
+    const msg = loadRoomMessages(roomId).messages.find((m) => m.id === messageId);
+    if (!msg) return null;
+    msg.digest = digest;
+    saveRoomMessages(roomId);
+    return msg;
+  },
+
   getRoomUnread(roomId) {
     return loadRoomMessages(roomId).unreadCount;
   },

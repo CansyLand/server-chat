@@ -411,6 +411,99 @@ html, body {
   background: var(--text-dim);
 }
 
+#room-digest-btn {
+  position: relative;
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  border: none;
+  background: var(--bubble-assistant);
+  font-size: 0.85rem;
+  line-height: 1;
+}
+/* An unanswered question is the one thing in this panel that's genuinely
+   urgent, so the button itself carries it rather than hiding it behind a tap. */
+#room-digest-btn.has-asks { box-shadow: 0 0 0 1.5px var(--accent); }
+#room-digest-btn .todo-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 8px;
+  background: var(--accent);
+  color: #0b0b0d;
+  font-size: 0.6rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* ---- "What's happening" panel ---- */
+#room-digest-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 55vh;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.digest-row {
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid #232328;
+  background: none;
+}
+.digest-row.system {
+  border: none;
+  text-align: center;
+  font-size: 0.72rem;
+  font-style: italic;
+  color: var(--text-dim);
+}
+/* The whole reason this panel exists: finding the messages that are waiting
+   on you without reading the transcript. */
+.digest-row.needs-you {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.digest-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
+}
+.digest-who {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--who-color, var(--text-dim));
+}
+.digest-tag {
+  font-size: 0.6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--bubble-assistant);
+  color: var(--text-dim);
+}
+.digest-tag.tag-problem { color: var(--error); }
+.digest-tag.tag-decision { color: var(--accent); }
+.digest-gist { font-size: 0.82rem; line-height: 1.35; }
+/* No digest yet (still summarising, or the call failed) — showing the raw
+   opening of the message is more useful than an empty row or a spinner. */
+.digest-gist.unsummarised { color: var(--text-dim); font-style: italic; }
+.digest-ask {
+  margin-top: 4px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--accent);
+}
+
 #room-stop-btn {
   flex-shrink: 0;
   width: 30px;

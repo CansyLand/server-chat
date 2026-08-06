@@ -81,6 +81,11 @@ const roomStopBtn = $('#room-stop-btn');
 const roomOptionsBtn = $('#room-options-btn');
 const usageBarsEl = $('#usage-bars');
 const jumpToLatestBtn = $('#jump-to-latest');
+const roomDigestBtn = $('#room-digest-btn');
+const roomDigestBadge = $('#room-digest-badge');
+const roomDigestModal = $('#room-digest-modal');
+const roomDigestListEl = $('#room-digest-list');
+const roomDigestCloseBtn = $('#room-digest-close');
 
 // A new service worker taking over mid-session means a fresh deploy just
 // landed; reload once so the page picks it up immediately instead of the
@@ -263,6 +268,7 @@ async function boot(token) {
   setupSettings(token);
   setupNewAgent(token);
   setupRooms(token);
+  setupRoomDigest();
   setupModelPicker(token);
   setupEffortPicker(token);
   setupTodos(token);
@@ -551,6 +557,121 @@ function renderRoomMembers(entry) {
   }
 }
 
+// ---- "What's happening" panel --------------------------------------------
+// A room of three agents produces more text, faster, than anyone will read.
+// Each agent message gets compressed server-side into one line (see
+// server/digest.js); this is where those lines are read, with anything the
+// agents are actually waiting on the human for pulled out and highlighted.
+const DIGEST_TAG_LABELS = {
+  decision: 'decision', question: 'question', progress: 'progress', problem: 'problem', done: 'done',
+};
+
+function renderRoomDigestBadge(entry) {
+  const count = entry?.pendingAsks || 0;
+  roomDigestBadge.hidden = count === 0;
+  roomDigestBadge.textContent = count > 9 ? '9+' : String(count);
+  roomDigestBtn.classList.toggle('has-asks', count > 0);
+}
+
+function buildDigestRow(m) {
+  const row = document.createElement('div');
+  row.className = 'digest-row';
+
+  const member = m.agentId ? rooms.get(currentRoomId)?.members.find((x) => x.id === m.agentId) : null;
+
+  if (m.role === 'system') {
+    row.classList.add('system');
+    row.textContent = m.text;
+    return row;
+  }
+
+  const head = document.createElement('div');
+  head.className = 'digest-head';
+  const who = document.createElement('span');
+  who.className = 'digest-who';
+  who.style.setProperty('--who-color', member?.color || 'var(--text-dim)');
+  who.textContent = m.agentId ? `${member?.emoji || '🤖'} ${m.sender || member?.name || 'Agent'}` : 'You';
+  head.appendChild(who);
+
+  if (m.digest?.tag) {
+    const tag = document.createElement('span');
+    tag.className = `digest-tag tag-${m.digest.tag}`;
+    tag.textContent = DIGEST_TAG_LABELS[m.digest.tag] || m.digest.tag;
+    head.appendChild(tag);
+  }
+  row.appendChild(head);
+
+  const body = document.createElement('div');
+  body.className = 'digest-gist';
+  if (!m.agentId) {
+    // Your own messages are never sent to the summarizer — you wrote them, and
+    // paying a model call to tell you what you said would be absurd.
+    body.textContent = m.text.slice(0, 200);
+  } else if (m.digest?.gist) {
+    body.textContent = m.digest.gist;
+  } else {
+    body.classList.add('unsummarised');
+    body.textContent = m.text.slice(0, 160);
+  }
+  row.appendChild(body);
+
+  if (m.digest?.addressesHuman) {
+    row.classList.add('needs-you');
+    const ask = document.createElement('div');
+    ask.className = 'digest-ask';
+    ask.textContent = m.digest.ask || 'Waiting on you.';
+    row.appendChild(ask);
+  }
+
+  return row;
+}
+
+let digestRefreshTimer = null;
+
+async function renderRoomDigest() {
+  if (!currentRoomId) return;
+  try {
+    const res = await fetch(`/api/rooms/${encodeURIComponent(currentRoomId)}/messages?limit=60`, {
+      headers: { Authorization: `Bearer ${currentToken}` },
+    });
+    const data = await res.json();
+    roomDigestListEl.innerHTML = '';
+    const messages = data.messages || [];
+    if (!messages.length) {
+      const empty = document.createElement('p');
+      empty.className = 'hint';
+      empty.textContent = 'Nothing has been said in this room yet.';
+      roomDigestListEl.appendChild(empty);
+      return;
+    }
+    for (const m of messages) roomDigestListEl.appendChild(buildDigestRow(m));
+    roomDigestListEl.scrollTop = roomDigestListEl.scrollHeight;
+  } catch {
+    /* offline — leave whatever was already rendered */
+  }
+}
+
+// Re-fetching the whole (small, local) list is both simpler and less
+// error-prone than patching individual rows as digests trickle in.
+function scheduleDigestRefresh() {
+  if (roomDigestModal.hidden) return;
+  clearTimeout(digestRefreshTimer);
+  digestRefreshTimer = setTimeout(renderRoomDigest, 400);
+}
+
+function setupRoomDigest() {
+  roomDigestBtn.addEventListener('click', () => {
+    roomDigestModal.hidden = false;
+    renderRoomDigest();
+  });
+  roomDigestCloseBtn.addEventListener('click', () => {
+    roomDigestModal.hidden = true;
+  });
+  roomDigestModal.addEventListener('click', (e) => {
+    if (e.target === roomDigestModal) roomDigestModal.hidden = true;
+  });
+}
+
 async function openRoom(roomId) {
   if (currentAgentId) saveDraft(currentAgentId, inputEl.value);
   if (currentRoomId && currentRoomId !== roomId) saveDraft('room:' + currentRoomId, inputEl.value);
@@ -573,6 +694,8 @@ async function openRoom(roomId) {
   updateSendButtonMode();
   hideSlashSuggestions();
   todoModal.hidden = true;
+  roomDigestModal.hidden = true;
+  if (entry) renderRoomDigestBadge(entry);
 
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'room_view', roomId }));
@@ -1832,6 +1955,7 @@ function handleServerEvent(msg) {
       // to re-render on every room_entry, not just on open.
       if (currentRoomId === msg.room.id) {
         renderRoomMembers(msg.room);
+        renderRoomDigestBadge(msg.room);
         updateSendButtonMode(); // busy-member count drives the send/stop toggle
       }
       setBadgeLocal(totalUnreadFromRoster());
@@ -1849,7 +1973,14 @@ function handleServerEvent(msg) {
           if (msg.message.agentId) scrollToBottomIfPinned();
           else scrollToBottom();
         }
+        scheduleDigestRefresh();
       }
+      break;
+
+    case 'room_digest':
+      // The summary for a message that landed a few seconds ago — only the
+      // overview panel cares, the transcript already showed the full text.
+      if (msg.roomId === currentRoomId) scheduleDigestRefresh();
       break;
 
     case 'room_removed':

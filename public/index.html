@@ -75,6 +75,7 @@
          is entirely agent-scoped (model, effort, context, todos). -->
     <div id="room-bar" hidden>
       <div id="room-members"></div>
+      <button id="room-digest-btn" type="button" aria-label="What's happening">📋<span id="room-digest-badge" class="todo-badge" hidden>0</span></button>
       <button id="room-stop-btn" type="button" aria-label="Stop everyone in this room">■</button>
     </div>
     <div id="usage-bars">
@@ -148,6 +149,15 @@
       <button type="button" id="new-agent-cancel">Cancel</button>
       <button type="button" id="agent-delete-btn" hidden>Delete agent</button>
     </form>
+  </div>
+</div>
+
+<div id="room-digest-modal" class="modal-overlay" hidden>
+  <div class="settings-sheet">
+    <h2 class="sheet-title">What's happening</h2>
+    <p class="field-hint">One line per message. Anything waiting on you is highlighted.</p>
+    <div id="room-digest-list"></div>
+    <button type="button" id="room-digest-close">Close</button>
   </div>
 </div>
 

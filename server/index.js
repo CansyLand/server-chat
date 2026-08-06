@@ -13,6 +13,7 @@ import { store } from './store.js';
 import { requireAuth, checkToken, isBanned, recordFailure, recordSuccess, timingSafeEqual, DEVICE_TOKEN } from './auth.js';
 import { sendPush, VAPID_PUBLIC_KEY } from './push.js';
 import { ClaudeBridge } from './claudeBridge.js';
+import { digestRoomMessage } from './digest.js';
 
 const PORT = process.env.PORT || 8720;
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
@@ -898,6 +899,40 @@ function anyClientViewingRoom(roomId) {
   return false;
 }
 
+function countPendingAsks(roomId) {
+  const messages = store.getRoomMessages(roomId);
+  let count = 0;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (!messages[i].agentId && messages[i].role === 'user') break; // the human's own last message
+    if (messages[i].digest?.addressesHuman) count += 1;
+  }
+  return count;
+}
+
+// Kicked off after the message is already stored and broadcast, never before:
+// the digest is a convenience, and a slow or failed model call must not delay
+// or block the discussion itself.
+function queueDigest(room, message) {
+  if (message.role !== 'agent') return;
+  digestRoomMessage({
+    roomName: room.name,
+    charter: room.charter,
+    memberNames: roomMemberAgents(room).map((a) => a.name),
+    senderName: roomSenderName(message),
+    text: message.text,
+  })
+    .then((digest) => {
+      if (!digest) return;
+      store.setRoomMessageDigest(room.id, message.id, digest);
+      broadcast({ type: 'room_digest', roomId: room.id, messageId: message.id, digest });
+      broadcastRoomEntry(room.id); // pendingAsks may have just changed
+    })
+    .catch((err) => {
+      // No digest simply means that row shows the raw message text instead.
+      console.error(`[digest:${room.id}]`, err.message);
+    });
+}
+
 function roomEntry(room) {
   const messages = store.getRoomMessages(room.id);
   const last = messages[messages.length - 1] || null;
@@ -915,6 +950,10 @@ function roomEntry(room) {
     })),
     unreadCount: store.getRoomUnread(room.id),
     lastMessage: last ? { text: last.text, ts: last.ts, sender: roomSenderName(last) } : null,
+    // Things an agent has asked the human for since the human last spoke.
+    // Counted from that point rather than over the whole transcript so it
+    // clears itself by being answered, instead of climbing forever.
+    pendingAsks: countPendingAsks(room.id),
     // Who in this room is mid-turn right now — drives the "3 agents thinking"
     // cue, which is the only way to tell a live discussion from a stalled one.
     // A rate-limited member is excluded: it keeps turnStartedAt set for the
@@ -1018,6 +1057,7 @@ async function postRoomMessage(room, { agentId = null, text, hops = 0 }) {
     hops,
   });
   broadcast({ type: 'room_message', roomId: room.id, message });
+  queueDigest(room, message);
 
   const members = roomMemberAgents(room);
   let mentions = parseMentions(text, members).filter((id) => id !== agentId);
