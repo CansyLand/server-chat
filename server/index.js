@@ -13,7 +13,7 @@ import { store } from './store.js';
 import { requireAuth, checkToken, isBanned, recordFailure, recordSuccess, timingSafeEqual, DEVICE_TOKEN } from './auth.js';
 import { sendPush, VAPID_PUBLIC_KEY } from './push.js';
 import { ClaudeBridge } from './claudeBridge.js';
-import { digestRoomMessage } from './digest.js';
+import { updateRoomBrief } from './brief.js';
 
 const PORT = process.env.PORT || 8720;
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
@@ -915,38 +915,65 @@ function anyClientViewingRoom(roomId) {
   return false;
 }
 
-function countPendingAsks(roomId) {
-  const messages = store.getRoomMessages(roomId);
-  let count = 0;
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (!messages[i].agentId && messages[i].role === 'user') break; // the human's own last message
-    if (messages[i].digest?.addressesHuman) count += 1;
+// One update in flight per room at a time. Everything said while an update is
+// running is folded into the *next* one rather than starting a second, so a
+// fast three-way exchange costs one call describing the whole burst instead of
+// one call per message racing each other to overwrite the same brief.
+const briefRuns = new Map(); // roomId -> { running: boolean }
+
+function queueBriefUpdate(roomId) {
+  let state = briefRuns.get(roomId);
+  if (!state) {
+    state = { running: false };
+    briefRuns.set(roomId, state);
   }
-  return count;
+  if (state.running) return; // it will pick up the new messages when it loops
+  runBriefUpdate(roomId);
 }
 
-// Kicked off after the message is already stored and broadcast, never before:
-// the digest is a convenience, and a slow or failed model call must not delay
-// or block the discussion itself.
-function queueDigest(room, message) {
-  if (message.role !== 'agent') return;
-  digestRoomMessage({
-    roomName: room.name,
-    charter: room.charter,
-    memberNames: roomMemberAgents(room).map((a) => a.name),
-    senderName: roomSenderName(message),
-    text: message.text,
-  })
-    .then((digest) => {
-      if (!digest) return;
-      store.setRoomMessageDigest(room.id, message.id, digest);
-      broadcast({ type: 'room_digest', roomId: room.id, messageId: message.id, digest });
-      broadcastRoomEntry(room.id); // pendingAsks may have just changed
-    })
-    .catch((err) => {
-      // No digest simply means that row shows the raw message text instead.
-      console.error(`[digest:${room.id}]`, err.message);
+async function runBriefUpdate(roomId) {
+  const state = briefRuns.get(roomId);
+  const room = store.getRoom(roomId);
+  if (!room || !state) return;
+
+  const all = store.getRoomMessages(roomId);
+  const since = room.briefSeq || 0;
+  // System notes are bookkeeping the brief shouldn't narrate.
+  const fresh = all.filter((m) => m.seq > since && m.role !== 'system');
+  if (!fresh.length) {
+    state.running = false;
+    return;
+  }
+
+  state.running = true;
+  const attemptedUpTo = all[all.length - 1].seq;
+  try {
+    const brief = await updateRoomBrief({
+      roomName: room.name,
+      charter: room.charter,
+      memberNames: roomMemberAgents(room).map((a) => a.name),
+      brief: store.getRoomBrief(roomId),
+      messages: fresh.map((m) => ({ sender: roomSenderName(m), text: m.text })),
     });
+    if (brief) {
+      store.setRoomBrief(roomId, brief);
+      store.updateRoom(roomId, { briefSeq: attemptedUpTo });
+      broadcast({ type: 'room_brief', roomId, brief: store.getRoomBrief(roomId) });
+      broadcastRoomEntry(roomId);
+    }
+    // A failed/unparseable update deliberately leaves briefSeq where it was, so
+    // those messages are retried as part of the next burst rather than being
+    // silently dropped from the brief forever.
+  } catch (err) {
+    console.error(`[brief:${roomId}]`, err.message);
+  }
+
+  state.running = false;
+  // Only re-run for messages that arrived *during* this attempt. Comparing
+  // against what we just attempted (not against briefSeq, which doesn't move
+  // on failure) is what stops a repeatedly-failing update from spinning.
+  const latest = store.getRoomMessages(roomId).slice(-1)[0]?.seq || 0;
+  if (latest > attemptedUpTo) runBriefUpdate(roomId);
 }
 
 function roomEntry(room) {
@@ -966,10 +993,10 @@ function roomEntry(room) {
     })),
     unreadCount: store.getRoomUnread(room.id),
     lastMessage: last ? { text: last.text, ts: last.ts, sender: roomSenderName(last) } : null,
-    // Things an agent has asked the human for since the human last spoke.
-    // Counted from that point rather than over the whole transcript so it
-    // clears itself by being answered, instead of climbing forever.
-    pendingAsks: countPendingAsks(room.id),
+    // Small enough to ride along with the roster, so the overview panel opens
+    // instantly instead of fetching, and updates itself as the room moves.
+    brief: room.brief || null,
+    pendingAsks: room.brief?.waitingOnYou?.length || 0,
     // Who in this room is mid-turn right now — drives the "3 agents thinking"
     // cue, which is the only way to tell a live discussion from a stalled one.
     // A rate-limited member is excluded: it keeps turnStartedAt set for the
@@ -1073,7 +1100,7 @@ async function postRoomMessage(room, { agentId = null, text, hops = 0 }) {
     hops,
   });
   broadcast({ type: 'room_message', roomId: room.id, message });
-  queueDigest(room, message);
+  queueBriefUpdate(room.id);
 
   const members = roomMemberAgents(room);
   let mentions = parseMentions(text, members).filter((id) => id !== agentId);
@@ -1267,6 +1294,19 @@ app.post('/api/rooms/:id/messages', requireAuth, async (req, res) => {
   }
   const message = await postRoomMessage(room, { agentId, text, hops: 0 });
   res.json({ message });
+});
+
+// Rebuilds the brief from scratch over the existing transcript. Needed for
+// rooms that predate the brief, and as the escape hatch when a brief has
+// drifted or gone stale — otherwise there's no way to correct one short of
+// waiting for enough new messages to push the old state out.
+app.post('/api/rooms/:id/brief/refresh', requireAuth, (req, res) => {
+  const room = store.getRoom(req.params.id);
+  if (!room) return res.status(404).json({ error: 'no such room' });
+  store.updateRoom(room.id, { brief: null, briefSeq: 0 });
+  broadcastRoomEntry(room.id);
+  queueBriefUpdate(room.id);
+  res.json({ ok: true, rebuilding: true });
 });
 
 app.post('/api/rooms', requireAuth, (req, res) => {

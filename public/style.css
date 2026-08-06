@@ -446,62 +446,91 @@ html, body {
 #room-digest-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  max-height: 55vh;
+  gap: 10px;
+  max-height: 60vh;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
 }
-.digest-row {
-  padding: 8px 10px;
-  border-radius: 10px;
-  border: 1px solid #232328;
-  background: none;
+.brief-headline {
+  font-size: 1rem;
+  font-weight: 700;
+  line-height: 1.3;
 }
-.digest-row.system {
-  border: none;
-  text-align: center;
-  font-size: 0.72rem;
-  font-style: italic;
+.brief-why {
+  font-size: 0.82rem;
+  line-height: 1.4;
   color: var(--text-dim);
 }
-/* The whole reason this panel exists: finding the messages that are waiting
-   on you without reading the transcript. */
-.digest-row.needs-you {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
+/* Deliberately the loudest thing in the panel and placed above everything
+   else: "is this stuck on me?" is usually the reason the panel is open. */
+.brief-waiting {
+  padding: 9px 11px;
+  border-radius: 10px;
+  border: 1px solid var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.digest-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 3px;
+.brief-waiting-title {
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent);
+  margin-bottom: 4px;
 }
-.digest-who {
-  font-size: 0.72rem;
+.brief-waiting-item {
+  font-size: 0.84rem;
+  line-height: 1.4;
+  font-weight: 600;
+}
+.brief-waiting-item + .brief-waiting-item { margin-top: 5px; }
+
+.brief-section { display: flex; flex-direction: column; gap: 4px; }
+.brief-section-title {
+  font-size: 0.66rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.brief-state { font-size: 0.82rem; line-height: 1.45; }
+
+.brief-who-row {
+  padding: 6px 9px;
+  border-radius: 9px;
+  border: 1px solid #232328;
+}
+.brief-who-name {
+  font-size: 0.74rem;
   font-weight: 600;
   color: var(--who-color, var(--text-dim));
 }
-.digest-tag {
-  font-size: 0.6rem;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-  padding: 1px 5px;
-  border-radius: 6px;
-  background: var(--bubble-assistant);
+.brief-who-doing { font-size: 0.8rem; line-height: 1.35; margin-top: 2px; }
+/* The reason, not the action — the thing the per-message version could never
+   see and the whole point of the rewrite. */
+.brief-who-why {
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  margin-top: 2px;
+}
+
+.brief-recent-item {
+  font-size: 0.78rem;
+  line-height: 1.35;
+  color: var(--text-dim);
+  padding-left: 10px;
+  position: relative;
+}
+.brief-recent-item::before {
+  content: "\2022";
+  position: absolute;
+  left: 0;
   color: var(--text-dim);
 }
-.digest-tag.tag-problem { color: var(--error); }
-.digest-tag.tag-decision { color: var(--accent); }
-.digest-gist { font-size: 0.82rem; line-height: 1.35; }
-/* No digest yet (still summarising, or the call failed) — showing the raw
-   opening of the message is more useful than an empty row or a spinner. */
-.digest-gist.unsummarised { color: var(--text-dim); font-style: italic; }
-.digest-ask {
-  margin-top: 4px;
-  font-size: 0.78rem;
-  font-weight: 600;
-  color: var(--accent);
+.brief-foot {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  text-align: right;
 }
 
 #room-stop-btn {

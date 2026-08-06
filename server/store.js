@@ -320,6 +320,8 @@ export const store = {
       // is trimmed at the front, which would silently shift indices).
       seen: {},
       nextSeq: 1,
+      brief: null,
+      briefSeq: 0, // transcript position the brief already reflects
       createdAt: Date.now(),
     };
     roomsState.rooms.push(room);
@@ -378,15 +380,19 @@ export const store = {
     saveRooms();
   },
 
-  // Digests arrive seconds after the message they describe (a separate model
-  // call), so they're patched onto the stored message rather than being part
-  // of it — the transcript must never wait on the overview.
-  setRoomMessageDigest(roomId, messageId, digest) {
-    const msg = loadRoomMessages(roomId).messages.find((m) => m.id === messageId);
-    if (!msg) return null;
-    msg.digest = digest;
-    saveRoomMessages(roomId);
-    return msg;
+  // The running brief: what the room is working on and why. Written by a
+  // separate model call seconds behind the transcript, so it lives beside the
+  // messages rather than inside them — the discussion must never wait on it.
+  // briefSeq is how far through the transcript the brief already accounts for.
+  getRoomBrief(roomId) {
+    return this.getRoom(roomId)?.brief || null;
+  },
+  setRoomBrief(roomId, brief) {
+    const room = this.getRoom(roomId);
+    if (!room) return null;
+    room.brief = { ...brief, updatedAt: Date.now() };
+    saveRooms();
+    return room.brief;
   },
 
   getRoomUnread(roomId) {

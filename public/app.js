@@ -86,6 +86,7 @@ const roomDigestBadge = $('#room-digest-badge');
 const roomDigestModal = $('#room-digest-modal');
 const roomDigestListEl = $('#room-digest-list');
 const roomDigestCloseBtn = $('#room-digest-close');
+const roomDigestRefreshBtn = $('#room-digest-refresh');
 
 // A new service worker taking over mid-session means a fresh deploy just
 // landed; reload once so the page picks it up immediately instead of the
@@ -558,13 +559,118 @@ function renderRoomMembers(entry) {
 }
 
 // ---- "What's happening" panel --------------------------------------------
-// A room of three agents produces more text, faster, than anyone will read.
-// Each agent message gets compressed server-side into one line (see
-// server/digest.js); this is where those lines are read, with anything the
-// agents are actually waiting on the human for pulled out and highlighted.
-const DIGEST_TAG_LABELS = {
-  decision: 'decision', question: 'question', progress: 'progress', problem: 'problem', done: 'done',
-};
+// Reads the room's running brief (see server/brief.js): what is being worked
+// on, why, where it stands, and what is waiting on you. Deliberately not a
+// per-message list — that was the first version of this, and a message
+// summarised in isolation shows an action with no visible reason, which read
+// as disconnected snippets rather than an explanation of anything.
+
+function briefSection(title) {
+  const el = document.createElement('div');
+  el.className = 'brief-section';
+  const h = document.createElement('div');
+  h.className = 'brief-section-title';
+  h.textContent = title;
+  el.appendChild(h);
+  return el;
+}
+
+function renderRoomBrief() {
+  const entry = rooms.get(currentRoomId);
+  const brief = entry?.brief;
+  roomDigestListEl.innerHTML = '';
+
+  if (!brief) {
+    const empty = document.createElement('p');
+    empty.className = 'hint';
+    empty.textContent = entry?.lastMessage
+      ? 'No brief yet — it is written a few seconds after each message. Tap "Rebuild from transcript" to build one now.'
+      : 'Nothing has been said in this room yet.';
+    roomDigestListEl.appendChild(empty);
+    return;
+  }
+
+  const headline = document.createElement('div');
+  headline.className = 'brief-headline';
+  headline.textContent = brief.headline;
+  roomDigestListEl.appendChild(headline);
+
+  if (brief.why) {
+    const why = document.createElement('div');
+    why.className = 'brief-why';
+    why.textContent = brief.why;
+    roomDigestListEl.appendChild(why);
+  }
+
+  // First, above everything else: the whole reason for opening this panel is
+  // usually to find out whether the room is stuck on you.
+  if (brief.waitingOnYou?.length) {
+    const box = document.createElement('div');
+    box.className = 'brief-waiting';
+    const title = document.createElement('div');
+    title.className = 'brief-waiting-title';
+    title.textContent = brief.waitingOnYou.length === 1 ? 'Waiting on you' : `Waiting on you (${brief.waitingOnYou.length})`;
+    box.appendChild(title);
+    for (const item of brief.waitingOnYou) {
+      const li = document.createElement('div');
+      li.className = 'brief-waiting-item';
+      li.textContent = item;
+      box.appendChild(li);
+    }
+    roomDigestListEl.appendChild(box);
+  }
+
+  if (brief.state) {
+    const sec = briefSection('Where it stands');
+    const p = document.createElement('div');
+    p.className = 'brief-state';
+    p.textContent = brief.state;
+    sec.appendChild(p);
+    roomDigestListEl.appendChild(sec);
+  }
+
+  if (brief.who?.length) {
+    const sec = briefSection('Who is doing what');
+    for (const w of brief.who) {
+      const member = entry.members.find((m) => m.name === w.name);
+      const row = document.createElement('div');
+      row.className = 'brief-who-row';
+      const who = document.createElement('div');
+      who.className = 'brief-who-name';
+      who.style.setProperty('--who-color', member?.color || 'var(--text-dim)');
+      who.textContent = `${member?.emoji || '🤖'} ${w.name}`;
+      row.appendChild(who);
+      const doing = document.createElement('div');
+      doing.className = 'brief-who-doing';
+      doing.textContent = w.doing;
+      row.appendChild(doing);
+      if (w.why) {
+        const why = document.createElement('div');
+        why.className = 'brief-who-why';
+        why.textContent = w.why;
+        row.appendChild(why);
+      }
+      sec.appendChild(row);
+    }
+    roomDigestListEl.appendChild(sec);
+  }
+
+  if (brief.recent?.length) {
+    const sec = briefSection('Just happened');
+    for (const item of brief.recent) {
+      const li = document.createElement('div');
+      li.className = 'brief-recent-item';
+      li.textContent = item;
+      sec.appendChild(li);
+    }
+    roomDigestListEl.appendChild(sec);
+  }
+
+  const foot = document.createElement('div');
+  foot.className = 'brief-foot';
+  foot.textContent = brief.updatedAt ? `Updated ${formatPreviewTime(brief.updatedAt)}` : '';
+  roomDigestListEl.appendChild(foot);
+}
 
 function renderRoomDigestBadge(entry) {
   const count = entry?.pendingAsks || 0;
@@ -573,102 +679,39 @@ function renderRoomDigestBadge(entry) {
   roomDigestBtn.classList.toggle('has-asks', count > 0);
 }
 
-function buildDigestRow(m) {
-  const row = document.createElement('div');
-  row.className = 'digest-row';
-
-  const member = m.agentId ? rooms.get(currentRoomId)?.members.find((x) => x.id === m.agentId) : null;
-
-  if (m.role === 'system') {
-    row.classList.add('system');
-    row.textContent = m.text;
-    return row;
-  }
-
-  const head = document.createElement('div');
-  head.className = 'digest-head';
-  const who = document.createElement('span');
-  who.className = 'digest-who';
-  who.style.setProperty('--who-color', member?.color || 'var(--text-dim)');
-  who.textContent = m.agentId ? `${member?.emoji || '🤖'} ${m.sender || member?.name || 'Agent'}` : 'You';
-  head.appendChild(who);
-
-  if (m.digest?.tag) {
-    const tag = document.createElement('span');
-    tag.className = `digest-tag tag-${m.digest.tag}`;
-    tag.textContent = DIGEST_TAG_LABELS[m.digest.tag] || m.digest.tag;
-    head.appendChild(tag);
-  }
-  row.appendChild(head);
-
-  const body = document.createElement('div');
-  body.className = 'digest-gist';
-  if (!m.agentId) {
-    // Your own messages are never sent to the summarizer — you wrote them, and
-    // paying a model call to tell you what you said would be absurd.
-    body.textContent = m.text.slice(0, 200);
-  } else if (m.digest?.gist) {
-    body.textContent = m.digest.gist;
-  } else {
-    body.classList.add('unsummarised');
-    body.textContent = m.text.slice(0, 160);
-  }
-  row.appendChild(body);
-
-  if (m.digest?.addressesHuman) {
-    row.classList.add('needs-you');
-    const ask = document.createElement('div');
-    ask.className = 'digest-ask';
-    ask.textContent = m.digest.ask || 'Waiting on you.';
-    row.appendChild(ask);
-  }
-
-  return row;
-}
-
-let digestRefreshTimer = null;
-
-async function renderRoomDigest() {
-  if (!currentRoomId) return;
-  try {
-    const res = await fetch(`/api/rooms/${encodeURIComponent(currentRoomId)}/messages?limit=60`, {
-      headers: { Authorization: `Bearer ${currentToken}` },
-    });
-    const data = await res.json();
-    roomDigestListEl.innerHTML = '';
-    const messages = data.messages || [];
-    if (!messages.length) {
-      const empty = document.createElement('p');
-      empty.className = 'hint';
-      empty.textContent = 'Nothing has been said in this room yet.';
-      roomDigestListEl.appendChild(empty);
-      return;
-    }
-    for (const m of messages) roomDigestListEl.appendChild(buildDigestRow(m));
-    roomDigestListEl.scrollTop = roomDigestListEl.scrollHeight;
-  } catch {
-    /* offline — leave whatever was already rendered */
-  }
-}
-
-// Re-fetching the whole (small, local) list is both simpler and less
-// error-prone than patching individual rows as digests trickle in.
-function scheduleDigestRefresh() {
-  if (roomDigestModal.hidden) return;
-  clearTimeout(digestRefreshTimer);
-  digestRefreshTimer = setTimeout(renderRoomDigest, 400);
-}
-
 function setupRoomDigest() {
   roomDigestBtn.addEventListener('click', () => {
     roomDigestModal.hidden = false;
-    renderRoomDigest();
+    renderRoomBrief();
   });
   roomDigestCloseBtn.addEventListener('click', () => {
     roomDigestModal.hidden = true;
   });
   roomDigestModal.addEventListener('click', (e) => {
     if (e.target === roomDigestModal) roomDigestModal.hidden = true;
+  });
+  roomDigestRefreshBtn.addEventListener('click', async () => {
+    if (!currentRoomId) return;
+    roomDigestRefreshBtn.disabled = true;
+    roomDigestRefreshBtn.textContent = 'Rebuilding…';
+    try {
+      await fetch(`/api/rooms/${encodeURIComponent(currentRoomId)}/brief/refresh`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${currentToken}` },
+      });
+      // The rebuilt brief arrives over the socket; until then say so rather
+      // than leaving the old one on screen looking current.
+      roomDigestListEl.innerHTML = '';
+      const p = document.createElement('p');
+      p.className = 'hint';
+      p.textContent = 'Rebuilding from the transcript — this takes a few seconds.';
+      roomDigestListEl.appendChild(p);
+    } catch {
+      /* offline — the existing brief is still on screen */
+    } finally {
+      roomDigestRefreshBtn.disabled = false;
+      roomDigestRefreshBtn.textContent = 'Rebuild from transcript';
+    }
   });
 }
 
@@ -1980,15 +2023,17 @@ function handleServerEvent(msg) {
           if (msg.message.agentId) scrollToBottomIfPinned();
           else scrollToBottom();
         }
-        scheduleDigestRefresh();
       }
       break;
 
-    case 'room_digest':
-      // The summary for a message that landed a few seconds ago — only the
-      // overview panel cares, the transcript already showed the full text.
-      if (msg.roomId === currentRoomId) scheduleDigestRefresh();
+    case 'room_brief': {
+      // The brief lands a few seconds behind the messages it describes, so it
+      // arrives on its own rather than with them.
+      const entry = rooms.get(msg.roomId);
+      if (entry) entry.brief = msg.brief;
+      if (msg.roomId === currentRoomId && !roomDigestModal.hidden) renderRoomBrief();
       break;
+    }
 
     case 'room_removed':
       rooms.delete(msg.roomId);
