@@ -844,6 +844,11 @@ const AT_PREFIX = '@(?:[\\p{Extended_Pictographic}\\p{Emoji_Component}\\uFE0F\\u
 // Longest name first, so "@NEO" inside a room that also has a "NEO - Cyber
 // Security" resolves to the longer, more specific one rather than whichever
 // happened to be stored first.
+// Addresses the whole room at once. Several spellings, because the one thing
+// worse than not having @all is having it silently not fire because you typed
+// the synonym the parser didn't know.
+const MENTION_ALL_ALIASES = ['all', 'everyone', 'room'];
+
 function parseMentions(text, members) {
   const found = [];
   for (const m of [...members].sort((a, b) => b.name.length - a.name.length)) {
@@ -852,6 +857,17 @@ function parseMentions(text, members) {
         found.push(m.id);
         break;
       }
+    }
+  }
+
+  // Only expands aliases no member has actually taken as a name — an agent
+  // literally called "Room" should keep its own mention.
+  const takenNames = new Set(members.map((m) => m.name.toLowerCase()));
+  for (const alias of MENTION_ALL_ALIASES) {
+    if (takenNames.has(alias)) continue;
+    if (new RegExp(AT_PREFIX + alias + '(?![\\w-])', 'iu').test(text)) {
+      for (const m of members) found.push(m.id);
+      break;
     }
   }
   return [...new Set(found)];
@@ -886,7 +902,7 @@ function buildRoomDelivery(room, agent, catchUp) {
     room.charter ? `Purpose of this room: ${room.charter}` : null,
     `Members:\n${members}`,
     `--- new in this room since you last spoke ---\n${transcript}\n--- end ---`,
-    `You were @mentioned. Your next reply is posted into #${room.name} automatically — write it as a message to the room, not as a report to one person, and keep it short enough for others to read quickly. To hand someone the next turn, @mention them by name; if the discussion has reached its end, reply without mentioning anyone.`,
+    `You were @mentioned. Your next reply is posted into #${room.name} automatically — write it as a message to the room, not as a report to one person, and keep it short enough for others to read quickly. To hand someone the next turn, @mention them by name (@all addresses every member at once — use it sparingly, it wakes everyone); if the discussion has reached its end, reply without mentioning anyone.`,
   ]
     .filter(Boolean)
     .join('\n\n');

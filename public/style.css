@@ -527,6 +527,11 @@ html, body {
   font-weight: 600;
   white-space: nowrap;
 }
+/* Woke the whole room rather than one agent — worth reading as heavier. */
+.mention-all {
+  background: color-mix(in srgb, var(--accent) 26%, transparent);
+  font-weight: 700;
+}
 
 /* With three or more voices in one feed, the sender label is what makes the
    transcript readable — colour alone stops scaling past two participants. */

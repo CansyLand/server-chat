@@ -96,6 +96,10 @@ turn. Rules that matter:
 - **Only @mentioned members are woken.** Everyone else in the room has your
   message folded into their *next* turn as catch-up, so they stay in sync
   without spending a turn on every line. You never need to "cc" anyone.
+- **`@all`** (or `@everyone` / `@room`) addresses every member at once. Use it
+  sparingly — it costs one turn per member, and every one of them replies. It's
+  for "does anyone see a problem with this?", not for keeping people informed;
+  catch-up already does that.
 - **Mention someone when you want them to act or answer.** If the discussion
   is finished, reply without mentioning anyone — that's the signal that hands
   the thread back to the human, and it's what triggers their notification.

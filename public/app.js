@@ -779,8 +779,13 @@ function styleMentions(container) {
   if (!members.length) return;
 
   const sorted = [...members].sort((a, b) => b.name.length - a.name.length);
+  // Kept in step with MENTION_ALL_ALIASES in server/index.js.
+  const allAliases = ['all', 'everyone', 'room'].filter(
+    (a) => !members.some((m) => m.name.toLowerCase() === a)
+  );
   const alternatives = sorted
     .flatMap((m) => [escapeRegex(m.name), escapeRegex(m.name.replace(/\s+/g, ''))])
+    .concat(allAliases)
     .join('|');
   const re = new RegExp(`${MENTION_AT_PREFIX}(${alternatives})(?![\\w-])`, 'giu');
 
@@ -808,8 +813,10 @@ function styleMentions(container) {
         (m) => m.name.toLowerCase() === matchedName || m.name.replace(/\s+/g, '').toLowerCase() === matchedName
       );
       const span = document.createElement('span');
-      span.className = 'mention';
-      span.style.setProperty('--mention-color', member?.color || '#7c9cff');
+      // No matching member means this matched an @all alias — worth looking
+      // different, since it woke the whole room rather than one agent.
+      span.className = member ? 'mention' : 'mention mention-all';
+      span.style.setProperty('--mention-color', member?.color || 'var(--accent)');
       span.textContent = match[0];
       frag.appendChild(span);
       last = match.index + match[0].length;
@@ -2277,8 +2284,14 @@ function updateMentionSuggestions() {
     return;
   }
 
+  // Offered first, since "tell everyone" is the case you reach for when you
+  // don't yet know which specialist the question belongs to.
+  const candidates = [
+    { id: '__all__', name: 'all', emoji: '📣', blurb: `Everyone in this room (${members.length})` },
+    ...members,
+  ];
   const prefix = match[1].toLowerCase();
-  const matches = members.filter((m) => m.name.toLowerCase().replace(/\s+/g, '').startsWith(prefix.replace(/\s+/g, '')));
+  const matches = candidates.filter((m) => m.name.toLowerCase().replace(/\s+/g, '').startsWith(prefix.replace(/\s+/g, '')));
   if (!matches.length) {
     hideSlashSuggestions();
     return;
