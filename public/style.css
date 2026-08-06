@@ -392,6 +392,17 @@ html, body {
 }
 #room-stop-btn:active { background: var(--error, #ff6b6b); color: #fff; }
 
+/* Tinted with the mentioned member's own colour, so "who was handed the next
+   turn" is answerable at a glance rather than by reading the sentence. */
+.mention {
+  color: var(--mention-color, var(--accent));
+  background: color-mix(in srgb, var(--mention-color, var(--accent)) 14%, transparent);
+  border-radius: 5px;
+  padding: 0 3px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 /* With three or more voices in one feed, the sender label is what makes the
    transcript readable — colour alone stops scaling past two participants. */
 .room-msg-sender {

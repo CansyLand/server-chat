@@ -608,7 +608,8 @@ function renderRoomMessage(m) {
   const { cleanText, options } = extractOptions(m.text);
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.innerHTML = renderMarkdown(highlightMentions(cleanText));
+  bubble.innerHTML = renderMarkdown(cleanText);
+  styleMentions(bubble);
   addCodeCopyButtons(bubble);
   el.appendChild(bubble);
   if (options.length) el.appendChild(buildOptionButtons(options));
@@ -617,21 +618,64 @@ function renderRoomMessage(m) {
   messagesEl.appendChild(el);
 }
 
-// @mentions are the routing mechanism, so they need to be visible as such —
+// Kept identical to the server's parser (server/index.js) — a mention shown
+// as highlighted here but not actually delivered there would be the worst
+// possible lie this UI could tell.
+const MENTION_AT_PREFIX = '@(?:[\\p{Extended_Pictographic}\\p{Emoji_Component}\\uFE0F\\u200D]+\\s*)?';
+
+function escapeRegex(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// @mentions are the routing mechanism, so they need to read as such —
 // scanning a transcript for who was actually handed the next turn is the main
-// thing you do when reading back a discussion you weren't watching live.
-function highlightMentions(text) {
-  const names = (rooms.get(currentRoomId)?.members || [])
-    .map((m) => m.name)
-    .sort((a, b) => b.length - a.length);
-  let out = text;
-  for (const name of names) {
-    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    for (const variant of [escaped, escaped.replace(/\\?\s+/g, '')]) {
-      out = out.replace(new RegExp('@' + variant + '(?![\\w-])', 'gi'), (match) => `\`${match}\``);
-    }
+// thing you do when catching up on a discussion you didn't watch live. Done
+// by walking text nodes of the already-rendered markdown rather than by
+// injecting markup into the source text: the message text comes from agents,
+// so it never gets to contribute HTML.
+function styleMentions(container) {
+  const members = rooms.get(currentRoomId)?.members || [];
+  if (!members.length) return;
+
+  const sorted = [...members].sort((a, b) => b.name.length - a.name.length);
+  const alternatives = sorted
+    .flatMap((m) => [escapeRegex(m.name), escapeRegex(m.name.replace(/\s+/g, ''))])
+    .join('|');
+  const re = new RegExp(`${MENTION_AT_PREFIX}(${alternatives})(?![\\w-])`, 'giu');
+
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+  const targets = [];
+  let node;
+  while ((node = walker.nextNode())) {
+    // Code blocks are quoting, not addressing — a mention inside one should
+    // not look like it routed anywhere.
+    if (node.parentElement?.closest('code, pre')) continue;
+    re.lastIndex = 0;
+    if (re.test(node.nodeValue)) targets.push(node);
   }
-  return out;
+
+  for (const textNode of targets) {
+    const text = textNode.nodeValue;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let match;
+    re.lastIndex = 0;
+    while ((match = re.exec(text))) {
+      if (match.index > last) frag.appendChild(document.createTextNode(text.slice(last, match.index)));
+      const matchedName = match[1].toLowerCase();
+      const member = sorted.find(
+        (m) => m.name.toLowerCase() === matchedName || m.name.replace(/\s+/g, '').toLowerCase() === matchedName
+      );
+      const span = document.createElement('span');
+      span.className = 'mention';
+      span.style.setProperty('--mention-color', member?.color || '#7c9cff');
+      span.textContent = match[0];
+      frag.appendChild(span);
+      last = match.index + match[0].length;
+    }
+    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)));
+    textNode.parentNode.replaceChild(frag, textNode);
+  }
 }
 
 // ---- Message pagination state ----

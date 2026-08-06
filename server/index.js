@@ -800,6 +800,13 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// An agent reading a member list rendered as "🍳 server-chat UI" will very
+// reasonably write "@🍳 server-chat UI" — observed on the first real run,
+// where that mention silently resolved to nobody. Tolerating an emoji (and
+// any spacing) between the @ and the name is much cheaper than trying to
+// train every agent out of the habit.
+const AT_PREFIX = '@(?:[\\p{Extended_Pictographic}\\p{Emoji_Component}\\uFE0F\\u200D]+\\s*)?';
+
 // Matches @Name / @NameNoSpaces / @id against the room's actual membership.
 // Longest name first, so "@NEO" inside a room that also has a "NEO - Cyber
 // Security" resolves to the longer, more specific one rather than whichever
@@ -808,7 +815,7 @@ function parseMentions(text, members) {
   const found = [];
   for (const m of [...members].sort((a, b) => b.name.length - a.name.length)) {
     for (const variant of [m.name, m.name.replace(/\s+/g, ''), m.id]) {
-      if (new RegExp('@' + escapeRe(variant) + '(?![\\w-])', 'i').test(text)) {
+      if (new RegExp(AT_PREFIX + escapeRe(variant) + '(?![\\w-])', 'iu').test(text)) {
         found.push(m.id);
         break;
       }
@@ -831,8 +838,11 @@ function roomSenderName(msg) {
 // copy, which is frozen at spawn time and goes stale the moment membership
 // changes.
 function buildRoomDelivery(room, agent, catchUp) {
+  // Names are written with the @ already attached so the mention token is
+  // unambiguous — listing "🍳 server-chat UI" instead invites "@🍳 server-chat
+  // UI", where the emoji is inside the mention.
   const members = roomMemberAgents(room)
-    .map((a) => `- ${a.emoji || '🤖'} ${a.name}${a.id === agent.id ? ' (you)' : ''}${a.blurb ? ` — ${a.blurb}` : ''}`)
+    .map((a) => `- ${a.emoji || '🤖'} @${a.name}${a.id === agent.id ? ' (you)' : ''}${a.blurb ? ` — ${a.blurb}` : ''}`)
     .join('\n');
   const transcript = catchUp
     .map((m) => (m.role === 'system' ? `[${m.text}]` : `${roomSenderName(m)}: ${m.text}`))
