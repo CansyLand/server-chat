@@ -595,10 +595,38 @@ function startAgentBridge(agent) {
         // turnStartedAt deliberately stays set — this agent is still
         // "busy" (waiting to retry), which also keeps it out of the
         // idle-sleep sweep for the duration of the wait.
-        store.updateAgent(agent.id, { waitingUntil: runtime.waitingUntil, lastUserText: runtime.lastUserText });
+        //
+        // replyTo rides along with lastUserText: the retry hours later resends
+        // that same text, and without persisting where the answer belongs, a
+        // server restart during the wait (routine here) would land the reply
+        // in the agent's DM instead of the room it was actually answering.
+        store.updateAgent(agent.id, {
+          waitingUntil: runtime.waitingUntil,
+          lastUserText: runtime.lastUserText,
+          replyTo: runtime.replyTo || null,
+          replyHops: runtime.replyHops || 0,
+        });
         broadcast({ type: 'waiting', agentId: agent.id, resumesAt: runtime.waitingUntil });
         broadcastRosterEntry(agent.id);
         scheduleRetry(agent.id, resetAt);
+
+        // The room otherwise just goes silent mid-discussion with no
+        // explanation, and stays that way for hours.
+        if (runtime.replyTo) {
+          const room = store.getRoom(runtime.replyTo);
+          if (room) {
+            const note = store.addRoomMessage(room.id, {
+              id: randomUUID(),
+              role: 'system',
+              agentId: null,
+              text: `${agent.name} hit its usage limit — it will answer automatically when the limit resets at ${new Date(runtime.waitingUntil).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.`,
+              ts: Date.now(),
+              hops: 0,
+            });
+            broadcast({ type: 'room_message', roomId: room.id, message: note });
+            broadcastRoomEntry(room.id);
+          }
+        }
         return;
       }
     }
@@ -760,6 +788,10 @@ function startAgentBridge(agent) {
   if (agent.waitingUntil) {
     runtime.waitingUntil = agent.waitingUntil;
     runtime.lastUserText = agent.lastUserText || null;
+    // Restored with the rest of the wait, so the retry's answer still goes to
+    // the room that asked rather than to this agent's DM.
+    runtime.replyTo = agent.replyTo || null;
+    runtime.replyHops = agent.replyHops || 0;
     runtime.turnStartedAt = Date.now();
     scheduleRetry(agent.id, new Date(agent.waitingUntil));
   }
@@ -885,7 +917,14 @@ function roomEntry(room) {
     lastMessage: last ? { text: last.text, ts: last.ts, sender: roomSenderName(last) } : null,
     // Who in this room is mid-turn right now — drives the "3 agents thinking"
     // cue, which is the only way to tell a live discussion from a stalled one.
-    busyMemberIds: members.filter((a) => isReallyWorking(runtimes.get(a.id))).map((a) => a.id),
+    // A rate-limited member is excluded: it keeps turnStartedAt set for the
+    // whole wait, so counting it as busy would show "replying…" for hours.
+    busyMemberIds: members
+      .filter((a) => isReallyWorking(runtimes.get(a.id)) && !runtimes.get(a.id)?.waitingUntil)
+      .map((a) => a.id),
+    waitingMemberIds: members
+      .filter((a) => runtimes.get(a.id)?.waitingUntil)
+      .map((a) => ({ id: a.id, resumesAt: runtimes.get(a.id).waitingUntil })),
     // Members carrying room context they haven't had a turn on yet.
     pendingMemberIds: members
       .filter((a) => store.getRoomSeen(room.id, a.id) < (last?.seq || 0))
@@ -1041,7 +1080,11 @@ function attemptRetrySend(agentId, attempt) {
     runtime.retryTimeoutId = null;
     runtime.turnStartedAt = Date.now();
     runtime.activeToolName = null;
-    store.updateAgent(agentId, { waitingUntil: null });
+    // The persisted copies exist only to survive a restart *during the wait*.
+    // The wait is over; runtime.replyTo (still set) carries the routing for
+    // the turn now in flight, and leaving a stale copy on disk would misroute
+    // some unrelated later reply into the room.
+    store.updateAgent(agentId, { waitingUntil: null, replyTo: null, replyHops: 0 });
     broadcast({ type: 'turn_started', agentId });
     broadcastRosterEntry(agentId);
   } catch (err) {
@@ -1509,7 +1552,7 @@ wss.on('connection', (ws, req) => {
         if (runtime.retryTimeoutId) clearTimeout(runtime.retryTimeoutId);
         runtime.retryTimeoutId = null;
         runtime.waitingUntil = null;
-        store.updateAgent(msg.agentId, { waitingUntil: null });
+        store.updateAgent(msg.agentId, { waitingUntil: null, replyTo: null, replyHops: 0 });
       } else if (!runtime.turnStartedAt) {
         // Already awake and idle — apply a pending model switch now, right
         // before this message, rather than the moment it was picked (which
@@ -1532,6 +1575,11 @@ wss.on('connection', (ws, req) => {
       try {
         runtime.bridge.send(msg.text);
         runtime.lastUserText = msg.text;
+        // You're talking to this agent directly, so its answer belongs here —
+        // never in a room whose delivery it happened to still owe a reply to
+        // (e.g. one superseded by this very message while it was rate-limited).
+        runtime.replyTo = null;
+        runtime.replyHops = 0;
         runtime.turnStartedAt = Date.now();
         runtime.activeToolName = null;
         // /compact is slow, silent, and emits no progress of its own, so flag
@@ -1560,7 +1608,10 @@ wss.on('connection', (ws, req) => {
         runtime.retryTimeoutId = null;
         runtime.waitingUntil = null;
         runtime.turnStartedAt = null;
-        store.updateAgent(msg.agentId, { waitingUntil: null });
+        // Cancelling the retry cancels the reply it owed the room too.
+        runtime.replyTo = null;
+        runtime.replyHops = 0;
+        store.updateAgent(msg.agentId, { waitingUntil: null, replyTo: null, replyHops: 0 });
         broadcastRosterEntry(msg.agentId);
       } else if (runtime && runtime.turnStartedAt) {
         runtime.interrupted = true;

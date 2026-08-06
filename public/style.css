@@ -383,6 +383,13 @@ html, body {
   font-size: 0.72rem;
   white-space: nowrap;
 }
+/* Waiting on a clock, not crunching — no animation, since nothing is
+   actually happening for the next few hours. */
+.room-bar-chip.waiting {
+  border-color: var(--text-dim);
+  opacity: 0.7;
+}
+
 /* Its own animation rather than work-pulse: that one scales and fades the
    element, which is right for a 12px dot and wrong for a text chip that has
    to stay readable while it pulses. */

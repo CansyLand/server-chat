@@ -327,12 +327,18 @@ function buildRoomRow(entry) {
   const preview = document.createElement('span');
   preview.className = 'agent-row-preview';
   const busy = entry.busyMemberIds?.length || 0;
+  const waiting = entry.waitingMemberIds?.length || 0;
   if (busy) {
     const names = entry.members
       .filter((m) => entry.busyMemberIds.includes(m.id))
       .map((m) => m.name)
       .join(', ');
     preview.textContent = `${names} ${busy === 1 ? 'is' : 'are'} replying…`;
+  } else if (waiting) {
+    // Nothing will visibly happen here until the limit resets, which is worth
+    // saying rather than leaving the room looking like it just went quiet.
+    const soonest = Math.min(...entry.waitingMemberIds.map((w) => w.resumesAt));
+    preview.textContent = `Rate limited — resumes ${formatResumeTime(soonest)}`;
   } else if (entry.lastMessage) {
     preview.textContent = `${entry.lastMessage.sender}: ${extractOptions(entry.lastMessage.text).cleanText.slice(0, 70)}`;
   } else {
@@ -521,15 +527,19 @@ function renderRoomMembers(entry) {
     chip.className = 'room-bar-chip';
     const busy = entry.busyMemberIds?.includes(m.id);
     const pending = entry.pendingMemberIds?.includes(m.id);
+    const waiting = entry.waitingMemberIds?.find((w) => w.id === m.id);
     if (busy) chip.classList.add('busy');
+    if (waiting) chip.classList.add('waiting');
     chip.style.setProperty('--chip-color', m.color || '#7c9cff');
-    chip.textContent = `${m.emoji || '🤖'} ${m.name}`;
-    chip.title = busy
-      ? `${m.name} is replying…`
-      : pending
-        ? `${m.name} hasn't read the latest yet — it will catch up on its next turn`
-        : m.blurb || m.name;
-    if (pending && !busy) {
+    chip.textContent = `${waiting ? '⏳ ' : ''}${m.emoji || '🤖'} ${m.name}`;
+    chip.title = waiting
+      ? `${m.name} hit its usage limit — resumes ${formatResumeTime(waiting.resumesAt)}`
+      : busy
+        ? `${m.name} is replying…`
+        : pending
+          ? `${m.name} hasn't read the latest yet — it will catch up on its next turn`
+          : m.blurb || m.name;
+    if (pending && !busy && !waiting) {
       const dot = document.createElement('span');
       dot.className = 'room-chip-pending';
       chip.appendChild(dot);
