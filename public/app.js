@@ -16,6 +16,7 @@ const usageWeekBar = $('#usage-week-bar');
 const usageWeekFill = $('#usage-week-fill');
 const usageContextBar = $('#usage-context-bar');
 const usageContextFill = $('#usage-context-fill');
+const effortControlEl = $('#effort-control');
 const clearBtn = $('#clear-btn');
 const compactBtn = $('#compact-btn');
 const todoBtn = $('#todo-btn');
@@ -517,10 +518,20 @@ function showListView() {
 function setChatMode(mode) {
   const isRoom = mode === 'room';
   roomBarEl.hidden = !isRoom;
-  usageBarsEl.hidden = isRoom;
   modelSelect.hidden = isRoom;
   agentOptionsBtn.hidden = isRoom;
   roomOptionsBtn.hidden = !isRoom;
+
+  // Session and week are account-wide — the same limits a room's replies are
+  // spending — so those bars stay up in both modes. Everything else in this
+  // strip belongs to one agent's session and means nothing for a room: context
+  // is per-session, and model/effort/clear/compact/todos are per-agent.
+  usageBarsEl.hidden = false;
+  usageContextBar.hidden = isRoom;
+  effortControlEl.hidden = isRoom;
+  clearBtn.hidden = isRoom;
+  compactBtn.hidden = isRoom;
+  todoBtn.hidden = isRoom;
   // Nothing happens in a room until someone is addressed, so the composer
   // should say so rather than leaving you to discover it.
   inputEl.placeholder = isRoom ? '@mention someone…' : 'Message…';

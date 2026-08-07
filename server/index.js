@@ -1745,6 +1745,11 @@ wss.on('connection', (ws, req) => {
         store.clearRoomUnread(ws.openRoomId);
         broadcastRoomEntry(ws.openRoomId);
       }
+      // Same reason the agent view does it: after each reply, turn_done already
+      // refreshes these numbers, but opening a room that has been idle for a
+      // while would otherwise show whatever reading was last taken elsewhere.
+      // No-op if every agent is busy.
+      if (ws.openRoomId) refreshUsage(null);
     } else if (msg.type === 'view') {
       // Which agent's chat (if any) is currently the open screen on this
       // connection — drives per-agent unread clearing and push suppression.
